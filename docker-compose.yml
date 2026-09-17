@@ -1,0 +1,260 @@
+networks:
+  ia-routing-stack:
+    driver: bridge
+  # Red externa del stack lms-amd-rx480 para que open-webui reach el backend AMD
+  lms-amd-rx480-net:
+    external: true
+    name: lms-amd-rx480_default
+volumes:
+  openvino-models: null
+  ov_cache: null
+  lms-config: null
+  open-webui-data: null
+services:
+  # ==========================================
+  # SECCIÓN MCP (Model Context Protocol Servers)
+  # Transporte: streamable-http (compatible nativo con Open WebUI >= 0.11)
+  # ==========================================
+
+  searxng-mcp:
+    image: searxng-mcp:latest
+    container_name: searxng-mcp
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  openterminal-mcp:
+    image: openterminal-mcp:latest
+    container_name: openterminal-mcp
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      - WORKSPACE_DIR=/workspace
+    volumes:
+      - /home/arkantu/produccion:/workspace
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  fetch-mcp:
+    image: fetch-mcp:latest
+    container_name: fetch-mcp
+    restart: unless-stopped
+    ports:
+      - "8095:8095"
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  nano-fs-tools-mcp:
+    image: nano-fs-tools-mcp:latest
+    container_name: nano-fs-tools-mcp
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - /home/arkantu/produccion:/workspace
+    environment:
+      - WORKSPACE_DIR=/workspace
+      - OPENVINO_GENAI_URL=http://intel-gemma4-optimum:8000/v1
+      - INTEL_OPENVINO_URL=http://intel-gemma4-optimum:8000/v1
+      - AMD_NODE_URL=http://lms-amd-rx480:1234/v1
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  zotero-mcp:
+    image: zotero-mcp:latest
+    container_name: zotero-mcp
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - /home/arkantu/Zotero:/root/Zotero:ro
+      - /home/arkantu/.config/zotero-mcp:/root/.config/zotero-mcp
+    environment:
+      - ZOTERO_LOCAL=true
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  moodle-ia-mcp:
+    build:
+      context: ./mcp-servers/moodle-ia-mcp
+      dockerfile: Dockerfile
+    image: moodle-ia-mcp:latest
+    container_name: moodle-ia-mcp
+    restart: unless-stopped
+    ports:
+      - "8097:8097"
+    environment:
+      - MOODLE_URL=https://moodle.neuropedialab.org
+      - MOODLE_TOKEN=734d7e02718f02570a70bdbc87698c78
+      - INTEL_OPENVINO_URL=http://intel-gemma4-optimum:8000/v1
+      - INTEL_FALLBACK_URL=http://192.168.0.100:8006/v1
+      - AMD_NODE_URL=http://192.168.0.80:1234/v1
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # ==========================================
+  # BENCHMARK UNIFICADO 2 BACKENDS
+  # OpenVINO GenAI (Intel Arc iGPU, puerto 8006)
+  # LM Studio RX480 (AMD RX480 Vulkan, puerto 1235)
+  # Uso: docker compose --profile benchmark run --rm dual-gpu-benchmark
+  #      docker compose --profile benchmark run --rm dual-gpu-benchmark -- --max-tokens 500
+  #      docker compose --profile benchmark run --rm dual-gpu-benchmark -- --skip-openvino
+  # ==========================================
+  dual-gpu-benchmark:
+    profiles: ["benchmark"]
+    build:
+      context: ./benchmark
+      dockerfile: Dockerfile
+    image: ia-dual-gpu-benchmark:latest
+    container_name: dual-gpu-benchmark
+    network_mode: host
+    volumes:
+      # Directorio de resultados
+      - /home/arkantu/produccion/benchmark-results:/output
+    environment:
+      - OPENVINO_URL=http://127.0.0.1:8006
+      - AMD_URL=http://127.0.0.1:1235
+      - BENCHMARK_OUTPUT_DIR=/output
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # ==========================================
+  # INTEL GEMMA4 OPTIMUM (OpenVINO GenAI)
+  # Servidor OpenVINO GenAI nativo (puerto 8006) compatible OpenAI API
+  # Usa Intel Arc iGPU Xe2 128EU via Level-Zero
+  # Accesible desde LM Studio Desktop via plugin openvino-genai-bridge
+  # ==========================================
+  intel-gemma4-optimum:
+    build:
+      context: ./intel-gemma4-optimum
+      dockerfile: Dockerfile
+    image: ia-services-stack-lms-optimum-intel:latest
+    container_name: intel-gemma4-optimum
+    restart: unless-stopped
+    shm_size: "64gb"
+    ports:
+      - "8006:8000"
+    ipc: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    devices:
+      - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/renderD129:/dev/dri/renderD129
+      - /dev/accel/accel0:/dev/accel/accel0
+    group_add:
+      - "44"
+      - "992"
+    volumes:
+      - /home/arkantu/produccion/openvino-models:/models:rw
+      - /opt/intel/oneapi:/opt/intel/oneapi:ro
+      - /opt/llama-cpp-intel-arc/build_sycl/bin:/opt/llama-sycl/bin:ro
+      - /lib/firmware/intel/vpu:/lib/firmware/intel/vpu:ro
+      - ./intel-gemma4-optimum/entrypoint.sh:/entrypoint.sh:ro
+      - ./intel-gemma4-optimum/server.py:/app/server.py:ro
+      - ./intel-gemma4-optimum/admin_dashboard.py:/app/admin_dashboard.py:ro
+      - ov_cache:/tmp/ov_cache
+      - lms-config:/root/.lmstudio
+    environment:
+      - MODELS_DIR=/models/.openvino-ir
+      - MODEL_PATH=/models/.openvino-ir/qwen2.5-7b-instruct-int4-ov
+      - DEVICE=GPU
+      - EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2-ov
+      - EMBEDDING_MODEL_NAME_2=nomic-embed-text-v1.5-ov
+      - PRELOAD_MODELS=qwen3-30b-a3b-instruct-2507-int4-ov
+      - MAX_CACHED_MODELS=3
+      - ONEAPI_DEVICE_SELECTOR=level_zero:0
+      - ZES_ENABLE_SYSMAN=1
+      - ZE_AFFINITY_MASK=0
+      - UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1
+      - SYCL_PI_LEVEL_ZERO_USM_RESIDENT=1
+      - NEOReadDebugKeys=1
+      - OverrideGpuAddressSpace=48
+      - DisableImplicitScaling=0
+      - IGC_EnableDPEmulation=0
+      - MESA_VK_DEVICE_SELECT=8086:7d51!
+      - GGML_VK_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=16
+      - KMP_AFFINITY=granularity=fine,compact,1,0
+      - NPU_PLATFORM=3720
+      - LMS_API_URL=http://172.18.0.1:1235
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # ==========================================
+  # Open WebUI - Frontend unificado para los backends GPU
+  # Expone dos conexiones OpenAI-compatible:
+  #   1. intel-gemma4-optimum (Intel Arc / OpenVINO GenAI) -> http://intel-gemma4-optimum:8000
+  #   2. lms-amd-rx480 (AMD RX480 / LM Studio)             -> http://lms-amd-rx480:1234
+  # Ambos backends no requieren API key real; usamos un placeholder "ollama".
+  # Los tags y prefix_id permiten distinguir los modelos de cada GPU en la UI.
+  # ==========================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # --- Backends OpenAI-compatible (separados por ';') ---
+      # Backend 0: Intel Arc (OpenVINO GenAI)
+      # Backend 1: AMD RX480 (LM Studio)
+      - ENABLE_OPENAI_API=True
+      - OPENAI_API_BASE_URLS=http://intel-gemma4-optimum:8000/v1;http://lms-amd-rx480:1234/v1
+      - OPENAI_API_KEYS=ollama;ollama
+      - OPENAI_API_CONFIGS={"0":{"prefix_id":"intel-arc","tags":["OpenVINO","Intel-Arc"]},"1":{"prefix_id":"amd-rx480","tags":["LM-Studio","AMD-RX480"]}}
+      # --- Ollama deshabilitado (no hay Ollama en este stack) ---
+      - ENABLE_OLLAMA_API=False
+      # --- Config general ---
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=False
+      - WEBUI_NAME=IA Services Stack
+      # Forzar que las variables de entorno prevalezcan sobre la BD
+      # para que los backends se carguen siempre al arrancar
+      - ENABLE_PERSISTENT_CONFIG=False
+    networks:
+      - ia-routing-stack
+      - lms-amd-rx480-net
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum

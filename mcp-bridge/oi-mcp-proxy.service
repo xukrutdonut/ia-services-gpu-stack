@@ -1,0 +1,16 @@
+[Unit]
+Description=OI-MCP Proxy: OpenVINO + openterminal-mcp bridge for Open Interpreter
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/arkantu/produccion/ia-services-stack/mcp-bridge/oi_mcp_proxy.py
+WorkingDirectory=/home/arkantu/produccion/ia-services-stack/mcp-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/arkantu/.local/lib/python3.14/site-packages:/usr/local/lib/python3.14/dist-packages:/usr/lib/python3.14/dist-packages:/usr/lib/python3/dist-packages
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

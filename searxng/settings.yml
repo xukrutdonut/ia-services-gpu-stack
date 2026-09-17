@@ -1,0 +1,16 @@
+use_default_settings: true
+general:
+  debug: false
+  instance_name: "SearXNG"
+server:
+  secret_key: "da3734ef105735f5e19c1bdfab2909f73d12eba3b2a86cdca57fcb4dbb9347df"
+  limiter: false
+  image_proxy: true
+  bind_address: "0.0.0.0"
+  port: 8080
+search:
+  safe_search: 0
+  autocomplete: "duckduckgo"
+  formats:
+    - html
+    - json

@@ -1,0 +1,34 @@
+# Secrets
+.env
+*.secret
+*.key
+
+# NPU driver binaries (146MB, obtain from intel-npu-driver snap)
+npu-drivers/
+intel-gemma4-optimum/npu-drivers/
+
+# Databases and runtime data
+*.db
+*.db-wal
+*.db-shm
+*.pid
+lm-chat/data/
+
+# Compiled binaries
+*.so
+*.so.*
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
