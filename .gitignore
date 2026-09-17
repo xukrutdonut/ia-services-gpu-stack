@@ -25,6 +25,11 @@ __pycache__/
 *.pyo
 *.egg-info/
 
+# Logs and crash dumps
+logs/
+*.log
+devcoredump*
+
 # OS
 .DS_Store
 Thumbs.db

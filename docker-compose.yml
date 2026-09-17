@@ -1,15 +1,12 @@
 networks:
   ia-routing-stack:
     driver: bridge
-  # Red externa del stack lms-amd-rx480 para que open-webui reach el backend AMD
-  lms-amd-rx480-net:
-    external: true
-    name: lms-amd-rx480_default
 volumes:
   openvino-models: null
   ov_cache: null
   lms-config: null
   open-webui-data: null
+  lms_amd_profile: null
 services:
   # ==========================================
   # SECCIÓN MCP (Model Context Protocol Servers)
@@ -17,6 +14,9 @@ services:
   # ==========================================
 
   searxng-mcp:
+    build:
+      context: ./mcp-servers/searxng-mcp
+      dockerfile: Dockerfile
     image: searxng-mcp:latest
     container_name: searxng-mcp
     restart: unless-stopped
@@ -30,6 +30,9 @@ services:
         - node.hostname == khazad-dum
 
   openterminal-mcp:
+    build:
+      context: ./mcp-servers/openterminal-mcp
+      dockerfile: Dockerfile
     image: openterminal-mcp:latest
     container_name: openterminal-mcp
     restart: unless-stopped
@@ -47,6 +50,9 @@ services:
         - node.hostname == khazad-dum
 
   fetch-mcp:
+    build:
+      context: ./mcp-servers/fetch-mcp
+      dockerfile: Dockerfile
     image: fetch-mcp:latest
     container_name: fetch-mcp
     restart: unless-stopped
@@ -60,6 +66,9 @@ services:
         - node.hostname == khazad-dum
 
   nano-fs-tools-mcp:
+    build:
+      context: ./mcp-servers/nano-fs-tools-mcp
+      dockerfile: Dockerfile
     image: nano-fs-tools-mcp:latest
     container_name: nano-fs-tools-mcp
     restart: unless-stopped
@@ -69,9 +78,9 @@ services:
       - /home/arkantu/produccion:/workspace
     environment:
       - WORKSPACE_DIR=/workspace
-      - OPENVINO_GENAI_URL=http://intel-gemma4-optimum:8000/v1
-      - INTEL_OPENVINO_URL=http://intel-gemma4-optimum:8000/v1
-      - AMD_NODE_URL=http://lms-amd-rx480:1234/v1
+      - OPENVINO_GENAI_URL=http://ia-gpu-intel-openvino:8000/v1
+      - INTEL_OPENVINO_URL=http://ia-gpu-intel-openvino:8000/v1
+      - AMD_NODE_URL=http://ia-gpu-amd-rx480:1234/v1
     networks:
       - ia-routing-stack
     deploy:
@@ -80,6 +89,9 @@ services:
         - node.hostname == khazad-dum
 
   zotero-mcp:
+    build:
+      context: ./mcp-servers/zotero-mcp
+      dockerfile: Dockerfile
     image: zotero-mcp:latest
     container_name: zotero-mcp
     restart: unless-stopped
@@ -109,7 +121,7 @@ services:
     environment:
       - MOODLE_URL=https://moodle.neuropedialab.org
       - MOODLE_TOKEN=734d7e02718f02570a70bdbc87698c78
-      - INTEL_OPENVINO_URL=http://intel-gemma4-optimum:8000/v1
+      - INTEL_OPENVINO_URL=http://ia-gpu-intel-openvino:8000/v1
       - INTEL_FALLBACK_URL=http://192.168.0.100:8006/v1
       - AMD_NODE_URL=http://192.168.0.80:1234/v1
     networks:
@@ -148,17 +160,18 @@ services:
         - node.hostname == khazad-dum
 
   # ==========================================
-  # INTEL GEMMA4 OPTIMUM (OpenVINO GenAI)
+  # IA-GPU-INTEL-OPENVINO (OpenVINO GenAI)
   # Servidor OpenVINO GenAI nativo (puerto 8006) compatible OpenAI API
   # Usa Intel Arc iGPU Xe2 128EU via Level-Zero
   # Accesible desde LM Studio Desktop via plugin openvino-genai-bridge
+  # Panel de administracion GPU en /admin
   # ==========================================
-  intel-gemma4-optimum:
+  ia-gpu-intel-openvino:
     build:
-      context: ./intel-gemma4-optimum
+      context: ./ia-gpu-intel-openvino
       dockerfile: Dockerfile
-    image: ia-services-stack-lms-optimum-intel:latest
-    container_name: intel-gemma4-optimum
+    image: ia-gpu-intel-openvino:latest
+    container_name: ia-gpu-intel-openvino
     restart: unless-stopped
     shm_size: "64gb"
     ports:
@@ -183,9 +196,9 @@ services:
       - /opt/intel/oneapi:/opt/intel/oneapi:ro
       - /opt/llama-cpp-intel-arc/build_sycl/bin:/opt/llama-sycl/bin:ro
       - /lib/firmware/intel/vpu:/lib/firmware/intel/vpu:ro
-      - ./intel-gemma4-optimum/entrypoint.sh:/entrypoint.sh:ro
-      - ./intel-gemma4-optimum/server.py:/app/server.py:ro
-      - ./intel-gemma4-optimum/admin_dashboard.py:/app/admin_dashboard.py:ro
+      - ./ia-gpu-intel-openvino/entrypoint.sh:/entrypoint.sh:ro
+      - ./ia-gpu-intel-openvino/server.py:/app/server.py:ro
+      - ./ia-gpu-intel-openvino/admin_dashboard.py:/app/admin_dashboard.py:ro
       - ov_cache:/tmp/ov_cache
       - lms-config:/root/.lmstudio
     environment:
@@ -210,7 +223,62 @@ services:
       - OMP_NUM_THREADS=16
       - KMP_AFFINITY=granularity=fine,compact,1,0
       - NPU_PLATFORM=3720
-      - LMS_API_URL=http://172.18.0.1:1235
+      - LMS_API_URL=http://ia-gpu-amd-rx480:1234
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # ==========================================
+  # IA-GPU-AMD-RX480 (LM Studio / LMLink)
+  # RX480 aislada del host - este contenedor es el UNICO que accede a la GPU AMD
+  # Host y OpenVINO usan solo Intel Arc (iGPU 00:02.0)
+  # RX480 = renderD128 / card1 (PCI 01:00.0, vendor 1002:67df)
+  # Sin ipc: host - namespace IPC propio para que el GUI del host no detecte
+  # el llmster del contenedor como instancia local. LMLink conecta por TCP.
+  # ==========================================
+  ia-gpu-amd-rx480:
+    build:
+      context: ./ia-gpu-amd-rx480
+      dockerfile: Dockerfile
+    image: ia-gpu-amd-rx480:latest
+    container_name: ia-gpu-amd-rx480
+    restart: "no"
+    ports:
+      - "1235:1234"
+      # 41344 (LMLink) no se publica al host para evitar conflictos
+      # con conexiones efimeras SSH. LMLink no se usa en benchmarks.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - lms_amd_profile:/root/.lmstudio
+      - /home/arkantu/modelos/rx480:/root/.lmstudio/models/rx480:ro
+      - ./ia-gpu-amd-rx480/entrypoint.sh:/root/lms-amd-entrypoint.sh:ro
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/kfd:/dev/kfd
+    environment:
+      - MESA_VK_DEVICE_SELECT=1002:67df!
+      - DRI_PRIME=1
+      - GGML_VK_VISIBLE_DEVICES=0
+      - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json
+      # Anti ring-timeout: batches de 100 nodos tardan >2s en Polaris ->
+      # kernel declara ring timeout -> GPU reset -> reset falla -> crash.
+      # Con 1 nodo por submit, cada vkQueueSubmit completa en <100ms.
+      - GGML_VK_MAX_NODES_PER_SUBMIT=1
+      - GGML_VK_DISABLE_ASYNC=1
+      - GGML_VK_FORCE_MAX_ALLOCATION_SIZE=2147483648
+    entrypoint: ["/root/lms-amd-entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:1234/api/v0/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     networks:
       - ia-routing-stack
     deploy:
@@ -221,8 +289,8 @@ services:
   # ==========================================
   # Open WebUI - Frontend unificado para los backends GPU
   # Expone dos conexiones OpenAI-compatible:
-  #   1. intel-gemma4-optimum (Intel Arc / OpenVINO GenAI) -> http://intel-gemma4-optimum:8000
-  #   2. lms-amd-rx480 (AMD RX480 / LM Studio)             -> http://lms-amd-rx480:1234
+  #   1. ia-gpu-intel-openvino (Intel Arc / OpenVINO GenAI) -> http://ia-gpu-intel-openvino:8000
+  #   2. ia-gpu-amd-rx480 (AMD RX480 / LM Studio)            -> http://ia-gpu-amd-rx480:1234
   # Ambos backends no requieren API key real; usamos un placeholder "ollama".
   # Los tags y prefix_id permiten distinguir los modelos de cada GPU en la UI.
   # ==========================================
@@ -239,7 +307,7 @@ services:
       # Backend 0: Intel Arc (OpenVINO GenAI)
       # Backend 1: AMD RX480 (LM Studio)
       - ENABLE_OPENAI_API=True
-      - OPENAI_API_BASE_URLS=http://intel-gemma4-optimum:8000/v1;http://lms-amd-rx480:1234/v1
+      - OPENAI_API_BASE_URLS=http://ia-gpu-intel-openvino:8000/v1;http://ia-gpu-amd-rx480:1234/v1
       - OPENAI_API_KEYS=ollama;ollama
       - OPENAI_API_CONFIGS={"0":{"prefix_id":"intel-arc","tags":["OpenVINO","Intel-Arc"]},"1":{"prefix_id":"amd-rx480","tags":["LM-Studio","AMD-RX480"]}}
       # --- Ollama deshabilitado (no hay Ollama en este stack) ---
@@ -253,7 +321,6 @@ services:
       - ENABLE_PERSISTENT_CONFIG=False
     networks:
       - ia-routing-stack
-      - lms-amd-rx480-net
     deploy:
       placement:
         constraints:

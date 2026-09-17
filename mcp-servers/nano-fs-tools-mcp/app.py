@@ -14,7 +14,7 @@ WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
 
 # LM Studio central con LMlink: modelos intel-arc-* (OpenVINO GenAI) y rx480/* (AMD Vulkan)
 LMSTUDIO_URL = os.environ.get("LMSTUDIO_URL", "http://192.168.0.100:1234/v1")
-# OpenVINO GenAI directo (intel-gemma4-optimum container)
+# OpenVINO GenAI directo (ia-gpu-intel-openvino container)
 OPENVINO_GENAI_URL = os.environ.get("OPENVINO_GENAI_URL", "http://192.168.0.100:8006/v1")
 # Alias compatibilidad
 INTEL_OPENVINO_URL = os.environ.get("INTEL_OPENVINO_URL", LMSTUDIO_URL)
@@ -172,7 +172,7 @@ async def subagent_task(
         model = await get_target_model(base_url, ["rx480/", "rx480-"], "rx480/qwen1.5-moe-a2.7b-chat@q4_k_m")
         sys_prompt = "You are a lightning-fast subagent running on dedicated AMD Radeon RX 480 Vulkan GPU hardware via LMlink. Return minimal token output and execute tasks directly."
     elif role == "openvino":
-        # OpenVINO GenAI directo (intel-gemma4-optimum container, sin LMlink)
+        # OpenVINO GenAI directo (ia-gpu-intel-openvino container, sin LMlink)
         base_url = OPENVINO_GENAI_URL
         model = await get_target_model(base_url, ["qwen2.5-coder", "qwen2.5-3b", "qwen1.5-moe"], "qwen2.5-3b-instruct-int4-ov")
         sys_prompt = "You are a subagent running on Intel Arc GPU via OpenVINO GenAI. Be concise and direct."

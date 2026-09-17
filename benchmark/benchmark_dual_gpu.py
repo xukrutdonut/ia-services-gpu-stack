@@ -4,7 +4,7 @@ Benchmark simultaneo dual-GPU (Intel Arc vs AMD RX480) via LM Studio HTTP API.
 
 Disenado para ejecutarse dentro de un container Docker (ia-services-stack).
 - Intel Arc: LM Studio host, puerto 1234
-- AMD RX480: contenedor lms-amd-rx480, puerto 1235
+- AMD RX480: contenedor ia-gpu-amd-rx480, puerto 1235
 - Usa /v1/chat/completions con stream=true para medir TTFT y tok/s reales
 - No necesita lms CLI: la API auto-carga el modelo al recibir la peticion
 

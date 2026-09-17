@@ -77,5 +77,5 @@ for n in CONCURRENT:
 print()
 print("=== RAM usage ===")
 import subprocess
-result = subprocess.run(["docker", "stats", "intel-gemma4-optimum", "--no-stream", "--format", "{{.MemUsage}} {{.CPUPerc}}"], capture_output=True, text=True)
+result = subprocess.run(["docker", "stats", "ia-gpu-intel-openvino", "--no-stream", "--format", "{{.MemUsage}} {{.CPUPerc}}"], capture_output=True, text=True)
 print(f"  Container: {result.stdout.strip()}")

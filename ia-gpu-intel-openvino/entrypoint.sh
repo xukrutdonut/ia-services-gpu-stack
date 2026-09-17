@@ -23,20 +23,20 @@ export NPU_PLATFORM="3720"
 export OV_NPU_LIBS_PATH="/usr/local/lib/python3.11/site-packages/openvino/libs"
 
 if [ -f /opt/intel/oneapi/setvars.sh ]; then
-    echo "[intel-gemma4-optimum] Cargando entorno Intel oneAPI..."
+    echo "[ia-gpu-intel-openvino] Cargando entorno Intel oneAPI..."
     source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
 fi
 export LD_LIBRARY_PATH="$OV_NPU_LIBS_PATH:/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/mkl/latest/lib:/opt/intel/oneapi/tbb/latest/lib:/opt/llama-sycl/bin:$LD_LIBRARY_PATH"
 
-echo "[intel-gemma4-optimum] Verificando Level-Zero / OpenCL / GPU Intel..."
+echo "[ia-gpu-intel-openvino] Verificando Level-Zero / OpenCL / GPU Intel..."
 if command -v clinfo > /dev/null 2>&1; then
     clinfo -l || true
 fi
 
-echo "[intel-gemma4-optimum] Iniciando servidor OpenAI API OpenVINO GenAI en 0.0.0.0:8000..."
+echo "[ia-gpu-intel-openvino] Iniciando servidor OpenAI API OpenVINO GenAI en 0.0.0.0:8000..."
 export PYTHONPATH="/app:${PYTHONPATH}"
 python3 -m uvicorn server:app --app-dir /app --host 0.0.0.0 --port 8000 > /tmp/openvino_server.log 2>&1 &
 sleep 2
 
-echo "[intel-gemma4-optimum] Contenedor activo y listo. Transmitiendo logs..."
+echo "[ia-gpu-intel-openvino] Contenedor activo y listo. Transmitiendo logs..."
 tail -f /tmp/openvino_server.log /dev/null
