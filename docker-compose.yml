@@ -6,7 +6,9 @@ volumes:
   ov_cache: null
   lms-config: null
   open-webui-data: null
-  lms_amd_profile: null
+  lms_amd_profile:
+    external: true
+    name: lms_amd_profile
 services:
   # ==========================================
   # SECCIÓN MCP (Model Context Protocol Servers)
