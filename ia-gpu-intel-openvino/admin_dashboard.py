@@ -30,10 +30,18 @@ import urllib.error
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# Helpers: sysfs GPU metrics for Intel Arc Xe2 (iGPU at 0000:00:02.0, card2)
+# Helpers: sysfs GPU metrics for Intel Arc Xe2 (iGPU at 0000:00:02.0, card0)
 # ---------------------------------------------------------------------------
-_IGT_PATH = "/sys/class/drm/card2/device/drm/card2"
-_IGT_GT_PATH = "/sys/class/drm/card2/device/drm/card2/gt"
+_IGT_PATH = "/sys/class/drm/card0/device/drm/card0"
+_IGT_GT_PATH = "/sys/class/drm/card0/device/drm/card0/gt"
+
+# RC6 residency delta tracking for GPU busy% calculation.
+# i915 does NOT expose a busy_percent sysfs file (unlike amdgpu).
+# We compute GPU utilization as: 100 - (rc6_delta_ms / time_delta_ms * 100).
+# When the GPU is busy, it cannot enter RC6 (sleep) state, so rc6_delta ≈ 0 → busy% ≈ 100.
+# When idle, rc6_delta ≈ time_delta → busy% ≈ 0.
+_prev_rc6_ms: Optional[int] = None
+_prev_rc6_ts: float = 0.0
 
 
 def _read_sysfs(path: str) -> Optional[str]:
@@ -83,6 +91,7 @@ def _get_gpu_tile_info(tile_dir: str) -> Dict[str, Any]:
 
 def _get_gpu_status() -> Dict[str, Any]:
     """Collect GPU metrics from sysfs."""
+    global _prev_rc6_ms, _prev_rc6_ts
     status: Dict[str, Any] = {
         "device": "Intel Arc Xe2 128EU (iGPU)",
         "pci_id": "8086:7d51",
@@ -107,6 +116,23 @@ def _get_gpu_status() -> Dict[str, Any]:
                 tiles[tile] = tile_info
     if tiles:
         status["tiles"] = tiles
+
+    # GPU busy% via RC6 residency delta (i915 has no busy_percent sysfs).
+    # RC6 = GPU sleep state. If RC6 didn't advance → GPU was busy.
+    rc6_path = os.path.join(_IGT_GT_PATH, "gt0", "rc6_residency_ms")
+    rc6_now = _read_sysfs_int(rc6_path)
+    if rc6_now is not None:
+        now_ts = time.monotonic()
+        if _prev_rc6_ms is not None and _prev_rc6_ts > 0:
+            rc6_delta = rc6_now - _prev_rc6_ms
+            time_delta_ms = (now_ts - _prev_rc6_ts) * 1000.0
+            if time_delta_ms > 0:
+                rc6_pct = max(0, min(100, (rc6_delta / time_delta_ms) * 100.0))
+                busy_pct = round(100.0 - rc6_pct, 1)
+                status["gpu_busy_percent"] = busy_pct
+                status["rc6_percent"] = round(rc6_pct, 1)
+        _prev_rc6_ms = rc6_now
+        _prev_rc6_ts = now_ts
 
     # GPU memory (shared system RAM on iGPU - report system RAM used by GPU processes)
     # iGPU uses shared RAM, no dedicated VRAM. We estimate GPU-allocated memory
@@ -1031,6 +1057,12 @@ body {
 
     <!-- Intel sidebar content -->
     <div id="sidebar-intel">
+      <div class="sidebar-section-title">Estado GPU Intel</div>
+      <div style="padding:6px 12px;font-size:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span>Carga GPU</span><span id="intelSbGpuBusy">--</span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:3px;"><span>Frecuencia</span><span id="intelSbFreq">--</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Memoria</span><span id="intelSbMem">--</span></div>
+      </div>
       <div class="sidebar-section-title">Modelos disponibles</div>
       <div class="model-list" id="modelList">
         <div style="padding:12px;color:var(--text-muted);text-align:center;"><span class="spinner"></span> Cargando...</div>
@@ -1080,8 +1112,8 @@ body {
           <div class="metrics-grid" id="gpuMetrics">
             <div class="metric-box"><div class="metric-label">Frecuencia actual</div><div class="metric-value" id="gpuFreq">--</div><div class="metric-sub">MHz</div></div>
             <div class="metric-box"><div class="metric-label">Frecuencia maxima</div><div class="metric-value" id="gpuMaxFreq">--</div><div class="metric-sub">MHz</div></div>
+            <div class="metric-box"><div class="metric-label">Carga GPU</div><div class="metric-value" id="gpuBusy">--</div><div class="metric-sub">% uso (RC6 delta)</div></div>
             <div class="metric-box"><div class="metric-label">Memoria proceso GPU</div><div class="metric-value" id="gpuMem">--</div><div class="metric-sub">MB RAM compartida</div></div>
-            <div class="metric-box"><div class="metric-label">RC6 Residency (gt0)</div><div class="metric-value" id="gpuRc6">--</div><div class="metric-sub">% ahorro energia</div></div>
           </div>
           <div class="freq-chart" id="freqChart"></div>
           <div id="throttleWarnings"></div>
@@ -1444,11 +1476,21 @@ async function refreshGPU() {
     document.getElementById('gpuMaxFreq').textContent = maxFreq;
     document.getElementById('gpuMem').textContent = gpu.gpu_process_memory_mb || '--';
 
-    // RC6 residency
-    if (gpu.tiles && gpu.tiles.gt0 && gpu.tiles.gt0.rc6_residency_ms != null) {
-      // RC6 residency ms is cumulative - show raw value
-      document.getElementById('gpuRc6').textContent =
-        (gpu.tiles.gt0.rc6_residency_ms / 1000).toFixed(0) + 's';
+    // GPU busy% (via RC6 residency delta, computed server-side)
+    const busyPct = gpu.gpu_busy_percent;
+    document.getElementById('gpuBusy').textContent = (busyPct != null ? busyPct : '--');
+
+    // Intel sidebar metrics
+    const sbBusy = document.getElementById('intelSbGpuBusy');
+    const sbFreq = document.getElementById('intelSbFreq');
+    const sbMem = document.getElementById('intelSbMem');
+    if (sbBusy) sbBusy.textContent = (busyPct != null ? busyPct + '%' : '--');
+    if (sbFreq) sbFreq.textContent = actFreq + ' MHz';
+    if (sbMem) sbMem.textContent = (gpu.gpu_process_memory_mb || '--') + ' MB';
+
+    // RC6 residency — show as info in tiles section
+    if (gpu.rc6_percent != null) {
+      // available but not shown as primary metric anymore
     }
 
     // Freq history chart — acumula todo el historico sin limite

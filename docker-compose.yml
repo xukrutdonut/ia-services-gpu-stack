@@ -6,6 +6,7 @@ volumes:
   ov_cache: null
   lms-config: null
   open-webui-data: null
+  open-terminal-data: null
   lms_amd_profile:
     external: true
     name: lms_amd_profile
@@ -15,35 +16,21 @@ services:
   # Transporte: streamable-http (compatible nativo con Open WebUI >= 0.11)
   # ==========================================
 
-  searxng-mcp:
-    build:
-      context: ./mcp-servers/searxng-mcp
-      dockerfile: Dockerfile
-    image: searxng-mcp:latest
-    container_name: searxng-mcp
+  # Open Terminal - servidor REST oficial de open-webui/open-terminal
+  # Integracion nativa en Open WebUI (Admin Settings -> Integrations -> Open Terminal)
+  # Da barra lateral con file browser, upload/download, editor y ejecucion de comandos
+  open-terminal:
+    image: ghcr.io/open-webui/open-terminal:slim
+    container_name: open-terminal
     restart: unless-stopped
     ports:
-      - "8092:8092"
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  openterminal-mcp:
-    build:
-      context: ./mcp-servers/openterminal-mcp
-      dockerfile: Dockerfile
-    image: openterminal-mcp:latest
-    container_name: openterminal-mcp
-    restart: unless-stopped
-    ports:
-      - "8003:8003"
+      - "8003:8000"
     environment:
-      - WORKSPACE_DIR=/workspace
+      - OPEN_TERMINAL_API_KEY=XMaT-ey_ekoJ9zHJITPpNQilqi_o9Sqy7G4q0jo1gyE
+      - OPEN_TERMINAL_FILE_BROWSER_ROOT=/workspace
     volumes:
-      - /home/arkantu/produccion:/workspace
+      - open-terminal-data:/home/user
+      - /home/arkantu/workspace:/workspace
     networks:
       - ia-routing-stack
     deploy:
@@ -97,19 +84,15 @@ services:
     image: zotero-mcp:latest
     container_name: zotero-mcp
     restart: unless-stopped
-    ports:
-      - "8765:8765"
+    # network_mode: host is required because Zotero's local API (port 23119)
+    # listens on 127.0.0.1 only, and pyzotero hardcodes localhost:23119.
+    # open-webui reaches this server via http://172.18.0.1:8765/mcp (docker bridge gateway).
+    network_mode: host
     volumes:
       - /home/arkantu/Zotero:/root/Zotero:ro
       - /home/arkantu/.config/zotero-mcp:/root/.config/zotero-mcp
     environment:
       - ZOTERO_LOCAL=true
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
 
   moodle-ia-mcp:
     build:
@@ -209,7 +192,7 @@ services:
       - DEVICE=GPU
       - EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2-ov
       - EMBEDDING_MODEL_NAME_2=nomic-embed-text-v1.5-ov
-      - PRELOAD_MODELS=qwen3-30b-a3b-instruct-2507-int4-ov
+      - PRELOAD_MODELS=qwen2.5-7b-instruct-int4-ov
       - MAX_CACHED_MODELS=3
       - ONEAPI_DEVICE_SELECTOR=level_zero:0
       - ZES_ENABLE_SYSMAN=1
@@ -247,7 +230,7 @@ services:
       dockerfile: Dockerfile
     image: ia-gpu-amd-rx480:latest
     container_name: ia-gpu-amd-rx480
-    restart: "no"
+    restart: unless-stopped
     ports:
       - "1235:1234"
       # 41344 (LMLink) no se publica al host para evitar conflictos
@@ -261,7 +244,8 @@ services:
       - /home/arkantu/modelos/rx480:/root/.lmstudio/models/rx480:ro
       - ./ia-gpu-amd-rx480/entrypoint.sh:/root/lms-amd-entrypoint.sh:ro
     devices:
-      - /dev/dri:/dev/dri
+      - /dev/dri/card1:/dev/dri/card1
+      - /dev/dri/renderD128:/dev/dri/renderD128
       - /dev/kfd:/dev/kfd
     environment:
       - MESA_VK_DEVICE_SELECT=1002:67df!
@@ -321,6 +305,14 @@ services:
       # Forzar que las variables de entorno prevalezcan sobre la BD
       # para que los backends se carguen siempre al arrancar
       - ENABLE_PERSISTENT_CONFIG=False
+      # Busqueda web nativa de Open WebUI (DuckDuckGo, sin contenedor extra)
+      - ENABLE_WEB_SEARCH=True
+      - WEB_SEARCH_ENGINE=duckduckgo
+      - WEB_SEARCH_RESULT_COUNT=5
+      - WEB_SEARCH_CONCURRENT_REQUESTS=5
+      # MCP tool servers (cargados desde env var porque ENABLE_PERSISTENT_CONFIG=False
+      # hace que Config.get() ignore la BD y use los defaults de DEFAULT_CONFIG)
+      - TOOL_SERVER_CONNECTIONS=[{"url":"http://moodle-ia-mcp:8097/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"moodle-ia","name":"Moodle-IA MCP","description":"Moodle content orchestrator MCP server"}},{"url":"http://172.18.0.1:8765/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"zotero-mcp","name":"Zotero MCP","description":"Zotero local library - semantic search, citations, PDF tools"}}]
     networks:
       - ia-routing-stack
     deploy:
