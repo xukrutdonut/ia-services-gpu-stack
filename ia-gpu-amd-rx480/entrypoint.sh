@@ -8,6 +8,19 @@ export DRI_PRIME=1
 export GGML_VK_VISIBLE_DEVICES=0
 export PATH=/root/.lmstudio/bin:$PATH
 
+# CORREGIDO 2026-10-01: el token real de Mesa/RADV es 'nosam' (sin guion), no
+# 'no_sam' — con guion se ignoraba silenciosamente. Verificado con:
+#   strings libvulkan_radeon.so | grep -x nosam   -> presente
+#   strings libvulkan_radeon.so | grep -x no_sam  -> AUSENTE
+# Y ADEMAS, en Mesa 25.2.8 'nosam' ya no es un RADV_PERFTEST sino una driconf
+# option, asi que hoy seria un no-op igualmente. Se deja documentado como
+# referencia historica; la linea real esta eliminada/desactivada porque el valor
+# correcto no aportaba nada (vulkaninfo seguia reportando sparseResidency=true).
+# IMPORTANTE: no usar `vulkaninfo` para "comprobar" la GPU: crea un device
+# Vulkan con sparse residency (set_prt=1) y deja amdgpu con la VM faults
+# desactivadas para TODO el arranque ("Disabling VM faults because of PRT
+# request!"), quitando la red de seguridad ante page faults de la GPU.
+
 echo "[lms-amd-entrypoint] Iniciando..."
 
 # Esperar a que el volumen esté montado y lms esté disponible
@@ -22,20 +35,25 @@ until [ -f /root/.lmstudio/bin/lms ]; do
     sleep 2
 done
 
-# Verificación estricta de GPU AMD Vulkan (Vendor ID 0x1002)
-# El contenedor NUNCA debe ejecutar inferencia en CPU.
-# IMPORTANTE: vulkaninfo se ejecuta con timeout 10s. Si la GPU está en estado zombie
-# (config space 0xff), vulkaninfo se quedaría colgado en D-state forever, bloqueando
-# el contenedor y la GPU. El timeout asegura que el proceso se mate antes de eso.
-echo "[lms-amd-entrypoint] Verificando presencia de GPU AMD Vulkan (1002:67df)..."
-echo "[lms-amd-entrypoint] Verificando presencia de GPU AMD Vulkan (1002:67df)..."
-if ! timeout 5 vulkaninfo --summary 2>&1 | grep -iE "vendorID.*0x1002|deviceName.*AMD|Radeon" > /dev/null; then
-    echo "[lms-amd-entrypoint] ❌ ERROR CRÍTICO: No se detectó ninguna GPU AMD activa por Vulkan."
-    echo "[lms-amd-entrypoint] ❌ Esperando 10s (puede que el driver esté en GPU reset) y abortando."
-    sleep 10  # Dar tiempo al driver para terminar el SRESET antes de que el watchdog reaccione
+# Verificación estricta de GPU AMD disponible.
+# IMPORTANTE: NO usar vulkaninfo --summary porque probea sparse resources y
+# puede disparar PRT incluso con RADV_PERFTEST=no_sam. En su lugar, verificar
+# via sysfs que el dispositivo DRM existe y tiene VRAM.
+echo "[lms-amd-entrypoint] Verificando GPU AMD via sysfs..."
+if [ ! -e /dev/dri/renderD128 ] || [ ! -e /dev/dri/card1 ]; then
+    echo "[lms-amd-entrypoint] ❌ ERROR CRÍTICO: /dev/dri/renderD128 o card1 no existen."
+    echo "[lms-amd-entrypoint] ❌ La GPU AMD no está disponible. Abortando."
+    sleep 10
     exit 1
 fi
-echo "[lms-amd-entrypoint] ✅ GPU AMD Vulkan detectada correctamente."
+# Verificar que card1 no es un dispositivo zombie (vendor 0x1002 = AMD)
+GPU_VENDOR=$(cat /sys/class/drm/card1/device/vendor 2>/dev/null || echo "")
+if [ "$GPU_VENDOR" != "0x1002" ]; then
+    echo "[lms-amd-entrypoint] ❌ ERROR: card1 vendor=$GPU_VENDOR (esperado 0x1002). GPU zombie?"
+    sleep 10
+    exit 1
+fi
+echo "[lms-amd-entrypoint] ✅ GPU AMD detectada via sysfs (vendor=0x1002)."
 
 # Borrar cache de indice de modelos stale.
 # LM Studio almacena en .internal/model-index-cache.json el indice de modelos
@@ -46,6 +64,49 @@ echo "[lms-amd-entrypoint] ✅ GPU AMD Vulkan detectada correctamente."
 if [ -f /root/.lmstudio/.internal/model-index-cache.json ]; then
     echo "[lms-amd-entrypoint] Limpiando model-index-cache.json stale..."
     rm -f /root/.lmstudio/.internal/model-index-cache.json
+fi
+
+# ==========================================================================
+# PERSISTENCIA DEL CONTEXTO (corregido 2026-10-02)
+# --------------------------------------------------------------------------
+# SINTOMA: OpenWebUI devolvia
+#   400 Engine protocol predict request returned 400:
+#   "request (8744 tokens) exceeds the available context size (8192 tokens)"
+# CAUSA: http-server-config.json tiene justInTimeModelLoading=true, asi que LM
+# Studio AUTO-CARGA el modelo por JIT cuando llega una peticion y el modelo no
+# esta cargado. Ese camino JIT NO usa el flag `-c 32768` del `lms load` de mas
+# abajo: usa `defaultContextLength` de /root/.lmstudio/settings.json, que venia
+# en {type:custom, value:4096}. El wrapper de llama-server normaliza a un minimo
+# de 8192 (ver bloque --ctx-size|-c mas abajo), de modo que:
+#   4096 (settings.json) -> normalizado 8192 -> --ctx-size 8192
+# Cualquier prompt > 8192 tokens fallaba. El `-c 32768` solo se respetaba en el
+# arranque limpio; la primera recarga JIT lo degradaba a 8192 y el cambio se
+# perdia ("regresionaba con el reinicio").
+# FIX: forzar defaultContextLength=32768 en cada arranque, de forma idempotente
+# y sin depender del estado del volumen. llmster lee settings.json en vivo, por
+# lo que el valor debe estar escrito ANTES de arrancar el daemon (es este punto).
+# ==========================================================================
+SETTINGS_JSON=/root/.lmstudio/settings.json
+NODE_BIN=/root/.lmstudio/.internal/utils/node
+export SETTINGS_JSON
+echo "[lms-amd-entrypoint] Fijando defaultContextLength=32768 en settings.json..."
+if [ -f "$SETTINGS_JSON" ] && [ -x "$NODE_BIN" ]; then
+    "$NODE_BIN" -e '
+        const fs = require("fs");
+        const p = process.env.SETTINGS_JSON;
+        const j = JSON.parse(fs.readFileSync(p, "utf8"));
+        const cur = j.defaultContextLength && j.defaultContextLength.value;
+        if (cur !== 32768) {
+            j.defaultContextLength = { type: "custom", value: 32768 };
+            fs.writeFileSync(p, JSON.stringify(j, null, 2));
+            console.log("  defaultContextLength: " + cur + " -> 32768 (actualizado)");
+        } else {
+            console.log("  defaultContextLength ya era 32768 (sin cambios)");
+        }
+    '
+else
+    echo "  ⚠️  AVISO: no se pudo fijar el contexto (falta $SETTINGS_JSON o $NODE_BIN)."
+    echo "  ⚠️  El JIT puede volver a cargar el modelo con ctx 8192 y OpenWebUI fallara."
 fi
 
 echo "[lms-amd-entrypoint] lms encontrado. Iniciando daemon llmster..."
@@ -61,9 +122,8 @@ else
 fi
 sleep 5
 
-# Iniciar servidor HTTP en 0.0.0.0:1234 para soporte API/JIT directo
-echo "[lms-amd-entrypoint] Iniciando servidor HTTP API en 0.0.0.0:1234..."
-/root/.lmstudio/bin/lms server start --bind 0.0.0.0 --port 1234 || true
+# NOTA: llmster ya arranca su propio servidor HTTP en 0.0.0.0:1234.
+# No ejecutar `lms server start` aqui — causa EADDRINUSE -> PID lock loss -> API cae.
 
 # Asegurar instalacion del wrapper de llama-server para estabilidad en AMD Polaris
 for backend_dir in /root/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-vulkan-*; do
@@ -112,9 +172,9 @@ export GGML_VK_MAX_NODES_PER_SUBMIT=1
 export GGML_VK_DISABLE_ASYNC=1
 export GGML_VK_FORCE_MAX_ALLOCATION_SIZE=2147483648
 export AMDGPU_TARGETS="gfx803"
-export RADV_PERFTEST="no_sam"
 export MESA_VK_DEVICE_SELECT="1002:67df!"
 export DRI_PRIME=1
+# RADV_PERFTEST y GGML_VK_ALLOW_EXOTIC ya exportados al inicio del entrypoint
 
 NEW_ARGS=()
 SKIP_NEXT=0
@@ -139,11 +199,11 @@ for ((i=1; i<=$#; i++)); do
             SKIP_NEXT=1
             ;;
         --ctx-size|-c)
-            # Cap a 8192 (antes 4096). El Qwen3-0.6B Q4_K_M ocupa ~400MB y la RX480
-            # tiene 8GB VRAM: sobra para 8192 tokens de KV cache en f16. Open WebUI
-            # envia system prompts largos que superan 4096 tokens facilmente.
-            if [ -n "$next_arg" ] && [ "$next_arg" -gt 8192 ] 2>/dev/null; then
-                NEW_ARGS+=("$arg" "8192")
+            # Cap a 32768. RX480 8GB VRAM: Qwen3-1.7B Q4_K_M (~1.2GB) + KV cache f16
+            # a 32768 tokens (~3.5GB) = ~4.7GB total, cabe holgado. OLMoE tiene
+            # max_context_length 4096, el modelo lo limita por si mismo.
+            if [ -n "$next_arg" ] && [ "$next_arg" -gt 32768 ] 2>/dev/null; then
+                NEW_ARGS+=("$arg" "32768")
             elif [ -n "$next_arg" ] && [ "$next_arg" -lt 8192 ] 2>/dev/null; then
                 NEW_ARGS+=("$arg" "8192")
             else
@@ -226,5 +286,31 @@ STATUS=$(/root/.lmstudio/bin/lms link status 2>&1)
 echo "[lms-amd-entrypoint] Estado LMLink:"
 echo "$STATUS"
 
-echo "[lms-amd-entrypoint] Nodo AMD listo. Manteniendo proceso activo..."
+echo "[lms-amd-entrypoint] Nodo AMD listo."
+
+# Cargar modelo qwen3-1.7b-instruct persistentemente (full GPU offload)
+echo "[lms-amd-entrypoint] Cargando modelo qwen3-1.7b-instruct (--gpu max)..."
+/root/.lmstudio/bin/lms load qwen3-1.7b-instruct --gpu max -c 32768 -y 2>&1 || \
+    echo "[lms-amd-entrypoint] WARNING: No se pudo cargar qwen3-1.7b-instruct automáticamente."
+
+# Arrancar el API server HTTP en 0.0.0.0:1234.
+# Tras el PID lock loss causado por lms link enable, llmster reviva con lms load
+# pero sin el server HTTP. Hay que arrancarlo explicitamente con --bind 0.0.0.0
+# para que sea accesible desde fuera del contenedor (puerto mapeado 1235->1234).
+echo "[lms-amd-entrypoint] Arrancando API server en 0.0.0.0:1234..."
+RETRIES=5
+while [ $RETRIES -gt 0 ]; do
+    if /root/.lmstudio/bin/lms server start --bind 0.0.0.0 --port 1234 2>&1; then
+        echo "[lms-amd-entrypoint] ✅ API server arrancado en 0.0.0.0:1234."
+        break
+    fi
+    echo "[lms-amd-entrypoint] Reintentando server start... ($((6-RETRIES))/5)"
+    sleep 3
+    RETRIES=$((RETRIES-1))
+done
+if [ $RETRIES -eq 0 ]; then
+    echo "[lms-amd-entrypoint] ⚠️ No se pudo arrancar el API server tras 5 intentos."
+fi
+
+echo "[lms-amd-entrypoint] Manteniendo proceso activo..."
 tail -f /dev/null

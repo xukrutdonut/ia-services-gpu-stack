@@ -152,10 +152,7 @@ services:
   # Panel de administracion GPU en /admin
   # ==========================================
   ia-gpu-intel-openvino:
-    build:
-      context: ./ia-gpu-intel-openvino
-      dockerfile: Dockerfile
-    image: ia-gpu-intel-openvino:latest
+    image: openvino/model_server:latest-gpu
     container_name: ia-gpu-intel-openvino
     restart: unless-stopped
     shm_size: "64gb"
@@ -177,23 +174,18 @@ services:
       - "44"
       - "992"
     volumes:
-      - /home/arkantu/produccion/openvino-models:/models:rw
-      - /opt/intel/oneapi:/opt/intel/oneapi:ro
-      - /opt/llama-cpp-intel-arc/build_sycl/bin:/opt/llama-sycl/bin:ro
-      - /lib/firmware/intel/vpu:/lib/firmware/intel/vpu:ro
-      - ./ia-gpu-intel-openvino/entrypoint.sh:/entrypoint.sh:ro
-      - ./ia-gpu-intel-openvino/server.py:/app/server.py:ro
-      - ./ia-gpu-intel-openvino/admin_dashboard.py:/app/admin_dashboard.py:ro
+      - /home/arkantu/produccion/openvino-models/.openvino-ir:/models:rw
       - ov_cache:/tmp/ov_cache
-      - lms-config:/root/.lmstudio
+    command:
+      - --config_path
+      - /models/config.json
+      - --rest_port
+      - "8000"
+      - --port
+      - "9000"
+      - --log_level
+      - INFO
     environment:
-      - MODELS_DIR=/models/.openvino-ir
-      - MODEL_PATH=/models/.openvino-ir/qwen2.5-7b-instruct-int4-ov
-      - DEVICE=GPU
-      - EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2-ov
-      - EMBEDDING_MODEL_NAME_2=nomic-embed-text-v1.5-ov
-      - PRELOAD_MODELS=qwen2.5-7b-instruct-int4-ov
-      - MAX_CACHED_MODELS=3
       - ONEAPI_DEVICE_SELECTOR=level_zero:0
       - ZES_ENABLE_SYSMAN=1
       - ZE_AFFINITY_MASK=0
@@ -208,7 +200,6 @@ services:
       - OMP_NUM_THREADS=16
       - KMP_AFFINITY=granularity=fine,compact,1,0
       - NPU_PLATFORM=3720
-      - LMS_API_URL=http://ia-gpu-amd-rx480:1234
     networks:
       - ia-routing-stack
     deploy:
@@ -230,7 +221,12 @@ services:
       dockerfile: Dockerfile
     image: ia-gpu-amd-rx480:latest
     container_name: ia-gpu-amd-rx480
-    restart: unless-stopped
+    # RESTART DESACTIVADO a proposito (2026-10-01). Con la GPU en estado wedged
+    # (page fault + ring timeout, requiere cold boot) "unless-stopped" entra en
+    # bucle de reinicio cada 6s. Reactivar a "unless-stopped" SOLO despues de
+    # validar los cambios de estabilidad en un cold boot (ver
+    # ia-gpu-amd-rx480/DIAGNOSTICO-RX480-2026-10-01.md).
+    restart: "no"
     ports:
       - "1235:1234"
       # 41344 (LMLink) no se publica al host para evitar conflictos
@@ -258,6 +254,19 @@ services:
       - GGML_VK_MAX_NODES_PER_SUBMIT=1
       - GGML_VK_DISABLE_ASYNC=1
       - GGML_VK_FORCE_MAX_ALLOCATION_SIZE=2147483648
+      # NOTA (2026-10-01) sobre variables ELIMINADAS tras verificarlas con strings
+      # sobre libggml-vulkan.so / libvulkan_radeon.so y con prueba empirica:
+      #  - RADV_PERFTEST=no_sam : NO EXISTE. El token real de Mesa es 'nosam'
+      #    (sin guion), y ademas en Mesa 25.2.8 ya no es un perftest sino una
+      #    driconf option. Con 'no_sam' RADV lo ignora -> sparseResidency seguia
+      #    en true y el kernel seguia imprimiendo "Disabling VM faults because of
+      #    PRT request!" al crear el device Vulkan. Config muerta, se elimina.
+      #  - GGML_VK_ALLOW_EXOTIC_SUBGROUP_OPS : NO EXISTE en libggml-vulkan.so
+      #    (verificado con strings). El driver Radv de esta version no expone
+      #    subgroups exoticas, asi que era un no-op. Se elimina.
+      #  - DRI_PRIME=1 : la RX480 es el segundo dispositivo; MESA_VK_DEVICE_SELECT
+      #    ya la fija de forma exacta. DRI_PRIME afecta GL/EGL, no a Vulkan.
+      #    Se mantiene por compatibilidad, no hace daño.
     entrypoint: ["/root/lms-amd-entrypoint.sh"]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:1234/api/v0/models || exit 1"]
@@ -313,6 +322,8 @@ services:
       # MCP tool servers (cargados desde env var porque ENABLE_PERSISTENT_CONFIG=False
       # hace que Config.get() ignore la BD y use los defaults de DEFAULT_CONFIG)
       - TOOL_SERVER_CONNECTIONS=[{"url":"http://moodle-ia-mcp:8097/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"moodle-ia","name":"Moodle-IA MCP","description":"Moodle content orchestrator MCP server"}},{"url":"http://172.18.0.1:8765/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"zotero-mcp","name":"Zotero MCP","description":"Zotero local library - semantic search, citations, PDF tools"}}]
+      # Open Terminal server (cargado desde env var porque ENABLE_PERSISTENT_CONFIG=False)
+      - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal-local","name":"Open Terminal (Khazad-dum)","enabled":true,"url":"http://open-terminal:8000","path":"/openapi.json","key":"XMaT-ey_ekoJ9zHJITPpNQilqi_o9Sqy7G4q0jo1gyE","auth_type":"bearer"}]
     networks:
       - ia-routing-stack
     deploy:
