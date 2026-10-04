@@ -1,7 +1,19 @@
-# PENDIENTE — Bench seguro RX 480 (handoff cold boot)
+# COMPLETADO — Bench seguro RX 480 (handoff cold boot)
 
-**Fecha:** 2026-10-04 · **Estado:** GPU wedgeada, contenedor no reparable en caliente.
+**Fecha del handoff:** 2026-10-04 · **Resuelto:** 2026-10-04 ~11:04.
 **Disparador:** el cold reboot físico (solo el usuario puede hacerlo).
+
+> **RESUELTO.** Cold boot a las 10:55 → arranque limpio (sin ring timeouts, PRT
+> ni `failed ret is 65535`). Contenedor recreado con la imagen nueva (`python3`
+> + montajes) y publicado en el registry `.101:5555/ia-gpu-amd-rx480:{latest,2026-10-04}`.
+> `--check` → LISTO, canary OK, bench completo OK (3/3 modelos). Sin timeouts
+> tras la corrida, `devcoredump` vacío, sclk coherente. Medidas reales en el
+> README y en `results/bench-20261004-090402.{json,md}`. `gpu-watchdog` v5.8
+> activo (ALLOW_SBR=0). Queda pendiente solo la Causa C (estrés sostenido), que
+> este bench de carga mínima no ejercita por diseño.
+> **Fix aplicado en este handoff:** el preflight trataba `GPU recovery disabled.`
+> como fatal (falso positivo en cada arranque con `gpu_recovery=0`); ahora es
+> ruido informativo y el harness también emite informe `.md`.
 
 ---
 

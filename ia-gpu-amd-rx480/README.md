@@ -90,7 +90,7 @@ Para permitir la ejecucion simultanea de LM Studio en el sistema Desktop (Intel 
    docker compose up -d
    ```
 
-## Resultados del Benchmark GPU AMD RX 480
+## Resultados del Benchmark GPU AMD RX 480 (historicos, superados)
 
 Resultados reales de inferencia en el contenedor acelerado por Vulkan sobre AMD Radeon RX 480 (8 GB):
 
@@ -107,7 +107,7 @@ Resultados reales de inferencia en el contenedor acelerado por Vulkan sobre AMD 
 
 - **LM Studio (Desktop Host)**: Intel Arc integrada como `Khazad-dum-Intel-ARC` (puerto 1234)
 - **Khazad-dum-AMD-eGPU (Contenedor)**: RX480 como nodo independiente en LMLink (puerto 1235)
-### Resultados del Benchmark Actualizados (Septiembre 2026)
+### Resultados del Benchmark (Septiembre 2026 — historicos, superados)
 Con `gpu-watchdog` configurado a 300s y aislamiento de Vulkan activo:
 
 | Modelo | Clave LMS | Rendimiento (tok/s) | Tokens Generados | TTFT | Tiempo Carga |
@@ -120,15 +120,30 @@ Con `gpu-watchdog` configurado a 300s y aislamiento de Vulkan activo:
 | **Ministral 8B Instruct** | `ministral-8b-instruct-2410` | **21.07 tok/s** | 265 | 0.329s | 3.1s |
 | **Qwen 1.5 MoE A2.7B Chat** | `qwen1.5-moe-a2.7b-chat` | **11.43 tok/s** | 409 | 0.824s | 16.2s |
 
-> Nota: las tablas de arriba son historicas (periodos en que la tarjeta estaba
-> sana). Tras el wedge de la RX 480 (ring timeouts + PRT, requiere cold boot)
-> no hay ninguna medida valida; la referencia sera el primer `bench-run.sh`
-> limpio posterior al cold boot.
+> Nota: las tablas anteriores son **historicas y estan superadas** (incluyen
+> periodos con `gpu-watchdog` erroneo y la retirada temporal de la tarjeta).
+> La referencia valida es la medida limpia de abajo, posterior al cold boot.
+
+### Medida limpia post cold boot — 2026-10-04 (`bench-run.sh`)
+
+Primer bench limpio tras el cold boot del 2026-10-04 10:55 (arranque sin ring
+timeouts, sin PRT). Protocolo `llama-bench`: `-p 64 -n 32 -r 1 -b 64 -ub 16 -ngl 99`.
+
+| Modelo | Clave | pp64 (tok/s) | tg32 (tok/s) | VRAM pico | Tamano | Tiempo |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| **Qwen3 0.6B Instruct** | `0.6b` | 285.2 | 52.8 | 6 MiB | 0.45 GiB | 2.0 s |
+| **Qwen3 1.7B Instruct** | `1.7b` | 198.0 | 41.4 | 1098 MiB | 1.19 GiB | 4.0 s |
+| **OLMoE 1B-7B Instruct** | `olmoe` | 131.8 | 51.6 | 4012 MiB | 3.92 GiB | 16.0 s |
+
+Sin nuevas lineas `ring ... timeout` ni `[gfxhub] Page fault` durante ni tras la
+corrida; `devcoredump` vacio; `pp_dpm_sclk` coherente (1184/1310 MHz bajo carga,
+300 MHz en idle). Artefactos: `results/bench-20261004-090402.json` y
+`results.jsonl`.
 
 ## Bench seguro (`bench-run.sh`)
 
 Protocolo anti-cuelgue para medir la RX 480 sin volver a tumbarla.
-Estado y handoff del cold boot: **[PENDIENTE-BENCH-RX480.md](PENDIENTE-BENCH-RX480.md)**.
+Handoff del cold boot (ya resuelto el 2026-10-04): **[PENDIENTE-BENCH-RX480.md](PENDIENTE-BENCH-RX480.md)**.
 
 ```bash
 cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
@@ -165,7 +180,7 @@ cd ~/produccion/ia-services-stack && docker compose up -d ia-gpu-amd-rx480
 cd ia-gpu-amd-rx480 && ./bench-run.sh
 ```
 El contenedor se recrea con la imagen nueva (python3) y los montajes
-`bench/`, `bench-bin/` y `results/`. Resultados en `results/`.
+`bench/`, `bench-bin/` y `results/`. Resultados en `results/` (`.json` + `.md`).
 `lms_amd_profile` es un volumen con nombre: recrear no borra llmster ni el
 backend Vulkan.
 

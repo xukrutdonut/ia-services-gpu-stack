@@ -205,9 +205,13 @@ def cmd_check(args):
               "El canary hara de prueba de vida.")
     else:
         lines = klog.splitlines()
+        # Fatales: ring timeout real y PRT ('Disabling VM faults' deja la GPU
+        # sin red de seguridad). 'GPU recovery disabled.' es ruido de INIT del
+        # driver con gpu_recovery=0 (se imprime 2x en cada arranque limpio, antes
+        # de 'hwmgr_sw_init'); NO es una recuperacion y no debe contar.
         hits = [l for l in lines
-                if re.search(r"ring .* timeout|GPU recovery disabled|"
-                             r"Disabling VM faults", l)]
+                if re.search(r"ring .* timeout|Disabling VM faults", l)]
+        boot_noise = sum(1 for l in lines if "GPU recovery disabled." in l)
         spam = sum(1 for l in lines if "failed ret is 65535" in l)
         print("  kernel log    : via %s" % klog_src)
         if hits:
@@ -218,6 +222,9 @@ def cmd_check(args):
             print("     -> cold boot obligatorio antes de cualquier bench.")
         else:
             print("  ring timeouts : ninguno en este arranque (limpio).")
+        if boot_noise:
+            print("  boot noise    : %d lineas 'GPU recovery disabled.' "
+                  "(init del driver, gpu_recovery=0; se ignoran)." % boot_noise)
         if spam > 5:
             verdict_ok = False
             print("  !! SMU no responde: %d lineas 'failed ret is 65535' -> "
@@ -533,7 +540,36 @@ def save_results(results, args, aborted):
         json.dump(payload, f, indent=2, ensure_ascii=False)
     with open(os.path.join(RESULTS_DIR, "results.jsonl"), "a") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    log("resultados -> %s" % j)
+    m = os.path.join(RESULTS_DIR, "bench-%s.md" % stamp)
+    with open(m, "w") as f:
+        f.write(render_markdown(payload))
+    log("resultados -> %s (+ .md)" % j)
+
+
+def render_markdown(payload):
+    """Informe legible de una corrida (mismo contenido que el .json)."""
+    p = payload["params"]
+    L = ["# Bench RX 480 (Vulkan) — %s" % payload["timestamp"],
+         "",
+         "Host: `%s` · abortado: %s" % (payload.get("host", "?"),
+                                        payload.get("aborted")),
+         "Protocolo: `-p %(prompt)s -n %(gen)s -r %(reps)s -b %(batch)s "
+         "-ub %(ubatch)s -ngl %(ngl)s`" % p,
+         "",
+         "| Modelo | Clave | pp tok/s | tg tok/s | VRAM pico (MiB) | "
+         "Tamano (GiB) | sclk | Tiempo (s) | Estado |",
+         "| :--- | :--- | ---: | ---: | ---: | ---: | :--- | ---: | :--- |"]
+    for r in payload["results"]:
+        L.append("| %s | `%s` | %s | %s | %s | %s | %s | %s | %s |"
+                 % (r.get("model", "?"), r.get("label", "?"),
+                    r.get("pp_ts", "-"), r.get("tg_ts", "-"),
+                    r.get("peak_vram_mib", "-"), r.get("model_size_gib", "-"),
+                    r.get("sclk", "-"), r.get("elapsed_s", "-"),
+                    r.get("status", "?")))
+    L += ["",
+          "Backend: Vulkan · `n_params`/`pp_sd`/`tg_sd` en el .json hermano.",
+          ""]
+    return "\n".join(L)
 
 
 def utf_node():
