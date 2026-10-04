@@ -117,34 +117,6 @@ services:
         - node.hostname == khazad-dum
 
   # ==========================================
-  # BENCHMARK UNIFICADO 2 BACKENDS
-  # OpenVINO GenAI (Intel Arc iGPU, puerto 8006)
-  # LM Studio RX480 (AMD RX480 Vulkan, puerto 1235)
-  # Uso: docker compose --profile benchmark run --rm dual-gpu-benchmark
-  #      docker compose --profile benchmark run --rm dual-gpu-benchmark -- --max-tokens 500
-  #      docker compose --profile benchmark run --rm dual-gpu-benchmark -- --skip-openvino
-  # ==========================================
-  dual-gpu-benchmark:
-    profiles: ["benchmark"]
-    build:
-      context: ./benchmark
-      dockerfile: Dockerfile
-    image: ia-dual-gpu-benchmark:latest
-    container_name: dual-gpu-benchmark
-    network_mode: host
-    volumes:
-      # Directorio de resultados
-      - /home/arkantu/produccion/benchmark-results:/output
-    environment:
-      - OPENVINO_URL=http://127.0.0.1:8006
-      - AMD_URL=http://127.0.0.1:1235
-      - BENCHMARK_OUTPUT_DIR=/output
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  # ==========================================
   # IA-GPU-INTEL-OPENVINO (OpenVINO GenAI)
   # Servidor OpenVINO GenAI nativo (puerto 8006) compatible OpenAI API
   # Usa Intel Arc iGPU Xe2 128EU via Level-Zero

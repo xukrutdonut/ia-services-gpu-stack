@@ -25,6 +25,9 @@ ia-gpu-amd-rx480/bench-bin/
 ia-gpu-amd-rx480/results/*
 !ia-gpu-amd-rx480/results/.gitkeep
 
+# Bench dual-GPU (Arc + RX480): resultados generados
+benchmark/results/
+
 # Python
 __pycache__/
 *.pyc

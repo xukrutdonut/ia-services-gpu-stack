@@ -9,7 +9,6 @@ Docker Swarm stack para servicios de IA en homelab con GPUs Intel Arc (Xe2 128EU
 | **ia-gpu-intel-openvino** | 8006 | Servidor OpenVINO GenAI (Intel Arc iGPU) compatible OpenAI API + panel admin en `/admin` |
 | **ia-gpu-amd-rx480** | 1235 | Nodo LM Studio (AMD RX480 Vulkan) aislado del host, con LMLink |
 | **open-webui** | 3000 | Frontend unificado para ambos backends GPU |
-| **dual-gpu-benchmark** | - | Benchmark dual-GPU (perfil `benchmark`) |
 | **searxng-mcp** | 8092 | MCP server: búsqueda web via SearXNG |
 | **openterminal-mcp** | 8003 | MCP server: terminal remoto |
 | **fetch-mcp** | 8095 | MCP server: fetch HTTP |
