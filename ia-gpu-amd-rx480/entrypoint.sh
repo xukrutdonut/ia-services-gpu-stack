@@ -181,7 +181,6 @@ export DRI_PRIME=1
 NEW_ARGS=()
 SKIP_NEXT=0
 MODEL_PATH=""
-KVK_Q8=0
 for ((i=1; i<=$#; i++)); do
     if [ "$SKIP_NEXT" -eq 1 ]; then
         SKIP_NEXT=0
@@ -202,23 +201,11 @@ for ((i=1; i<=$#; i++)); do
             NEW_ARGS+=("$arg" "1")
             SKIP_NEXT=1
             ;;
-        --cache-type-k|-ctk)
-            # KV-K a q8_0 SOLO cuando hace falta (OLMoE a 32768): ahorra la mitad
-            # del K (2,0 -> 1,0 GB a 32768) y es lo que hace que quepa en 8 GB.
-            # V no se cuantiza: llama.cpp exige --flash-attn para V y aqui esta
-            # forzado off por estabilidad (Polaris). f16 para K y V en el resto.
-            if [ "$KVK_Q8" = 1 ]; then
-                NEW_ARGS+=("$arg" "q8_0")
-            else
-                NEW_ARGS+=("$arg" "$next_arg")
-            fi
-            SKIP_NEXT=1
-            ;;
         --ctx-size|-c)
-            # Cap 32768 (RX480 8 GB, 8,19 GB reales). Suelo por modelo:
+            # Cap 32768 (RX480 8 GiB = 8,59 GB decimales). Suelo por modelo:
             #  - Embeddings: sin suelo (ctx nativo corto, nadie les manda prompts
             #    largos; forzarles 16k solo gastaria VRAM).
-            #  - OLMoE: 32768 con K del KV en q8_0 (~450 MB de VRAM libres).
+            #  - OLMoE: 16384 (justificado abajo).
             #  - Resto: 16384.
             # Motivo del suelo: LM Studio pide 4096 a OLMoE (max_context_length
             # del GGUF) y con 4096 OpenWebUI/OpenInterpreter rechazan cualquier
@@ -227,20 +214,25 @@ for ((i=1; i<=$#; i++)); do
             # Trade-off aceptado y documentado en PENDIENTE-BENCH-RX480.md §8.
             # VRAM MEDIDA (2026-10-04, KV de OLMoE = 128 KB/token: 16 capas x 16
             # cabezas KV x 128 dim x 2 (K+V) x 2 B; pesos Q4_K_M ~4,0 GB):
-            #   8192  f16    -> 5,02 GB  (medido; 4,0 + 1,0 KV)
-            #   16384 f16    -> 6,40 GB  (medido; ~1,8 GB libres)
-            #   32768 f16    -> NO ARRANCA: 8,0 GB+ de KV+pesos+buffers >
-            #                   8,19 GB -> "Engine protocol startup was aborted"
-            #   32768 K/q8_0 -> 7,75 GB  (medido; 94% VRAM, ~0,45 GB libres)
+            #   8192  f16    -> 5,02 GB usados (3,6 GB libres)
+            #   16384 f16    -> 6,40 GB usados (2,2 GB libres)  <- ELEGIDO
+            #   32768 f16    -> NO ARRANCA: KV 4,0 GB + pesos 4,0 GB + buffers >
+            #                   8 GiB -> "Engine protocol startup was aborted"
+            #   32768 K/q8_0 -> 7,75 GB usados (0,45 GB libres)
+            #
+            # Por que 16384 y no 32768 para OLMoE (decision 2026-10-04): OLMoE tiene
+            # n_ctx_train=4096, asi que mas contexto NO mejora la calidad, solo evita
+            # que la API rechace el prompt. A 32768 el margen es ~0,45 GB y este
+            # contenedor tiene un fallo conocido de oversubscription (el wrapper puede
+            # lanzar 2-3 llama-server.real en paralelo), que con la VRAM al limite
+            # produce "Engine protocol startup was aborted" y teardown sucio del kernel
+            # ("leaking bo va") -> riesgo de wedge con cold boot fisico.
             FLOOR=16384
-            KVK_Q8=0
             case "$MODEL_PATH" in
                 # Embeddings: sin suelo (ctx nativo corto, nadie les manda prompts largos).
                 *mbed*) FLOOR=0;;
-                # OLMoE: 32768 solo cabe con K del KV en q8_0 (ver nota de arriba).
-                # 16384 f16 -> ~6,4 GB medidos; 32768 f16 -> no arranca. Con K q8_0
-                # el KV baja de 4,0 a 3,0 GB (V no se puede cuantizar sin flash-attn).
-                *[Oo][Ll][Mm][Oo][Ee]*) FLOOR=32768; KVK_Q8=1;;
+                # OLMoE: 16384 (ver justificacion arriba).
+                *[Oo][Ll][Mm][Oo][Ee]*) FLOOR=16384;;
             esac
             if [ -n "$next_arg" ] && [ "$next_arg" -gt 32768 ] 2>/dev/null; then
                 NEW_ARGS+=("$arg" "32768")

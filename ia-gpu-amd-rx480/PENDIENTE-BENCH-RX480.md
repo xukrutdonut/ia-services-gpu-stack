@@ -171,47 +171,59 @@ suelta (exit `3`, cold boot).
 
 ---
 
-## 8. Contexto de OLMoE en OpenWebUI/OpenInterpreter - 2026-10-04
+## 8. Contexto de OLMoE en OpenWebUI/OpenInterpreter. Decision final: 16384
+
+**Estado: OLMoE a 16384 tokens, KV en f16** (suelo por modelo en el wrapper,
+`entrypoint.sh`, bloque `--ctx-size`). Medido en vivo: 6,40 GB de VRAM usados de
+8 GiB (74%), 2,2 GB libres.
 
 **Hecho duro:** OLMoE-1B-7B-Instruct tiene `n_ctx_train = 4096` (lo declara el
-GGUF; llama.cpp lo avisa al cargar). No es un limite de config: por encima de
-4096 el modelo extrapola RoPE y la calidad se degrada. La config solo decide si
-la API **rechaza** el prompt (ctx 4096) o lo **acepta degradado** (ctx 8192+).
+GGUF). No es un limite de config: por encima de 4096 el modelo extrapola RoPE y
+la calidad degrada. La config solo decide si la API **rechaza** el prompt
+(ctx 4096) o lo **acepta degradado** (8192+).
 
 **Por que hay suelo:** LM Studio pide 4096 a OLMoE (`max_context_length` del
 GGUF), y con 4096 OpenWebUI/OpenInterpreter rechazan cualquier prompt >4096. El
-wrapper eleva la peticion para que no fallen.
+wrapper eleva la peticion para que no fallen. Suelo por modelo:
 
-**Suelo por modelo** (rama `--ctx-size` del wrapper en `entrypoint.sh`):
-- Embeddings -> sin suelo (ctx nativo corto; forzar 16k solo gastaria VRAM).
-- OLMoE -> 32768 con el KV-K en `q8_0` (V no se puede cuantizar: exige
-  `--flash-attn`, aqui forzado off por estabilidad en Polaris).
-- Resto (Qwen3, etc.) -> suelo 16384; LM Studio ya les pide 32768.
+- Embeddings: sin suelo (ctx nativo corto; forzar 16k solo gastaria VRAM).
+- OLMoE: 16384.
+- Resto (Qwen3-1.7B, Qwen3-0.6B): 16384 de suelo; LM Studio ya les pide 32768,
+  asi que en la practica no les afecta.
 
-**VRAM medida** (RX480, 8,19 GB reales). KV de OLMoE = 128 KB/token
-(16 capas x 16 cabezas KV x 128 dim x 2 (K+V) x 2 B):
+**VRAM medida (RX480 8 GiB = 8,59 GB decimales). KV de OLMoE = 128 KB/token**
+(16 capas x 16 cabezas KV x 128 dim x 2 (K+V) x 2 B; pesos Q4_K_M ~4,0 GB):
 
-| config                       | VRAM usada | libre   | resultado |
-|------------------------------|-----------:|--------:|-----------|
-| OLMoE @8192,  KV f16         | 5,02 GB    | 3,17 GB | OK |
-| OLMoE @16384, KV f16         | 6,40 GB    | 1,79 GB | OK |
-| OLMoE @32768, KV f16         | >8,19 GB   | -       | NO ARRANCA ("Engine protocol startup was aborted") |
-| OLMoE @32768, K q8_0 / V f16 | 7,75 GB    | 0,44 GB | OK  <- estado actual |
+  config                       VRAM usada   libre      resultado
+  OLMoE @8192   KV f16          5,02 GB     3,6 GB    OK
+  OLMoE @16384  KV f16          6,40 GB     2,2 GB    OK  <- ELEGIDO (74%)
+  OLMoE @32768  KV f16          8,0+ GB     --        NO ARRANCA ("Engine
+                                                      protocol startup was
+                                                      aborted")
+  OLMoE @32768  K/q8_0,V/f16    7,75 GB     0,45 GB   OK pero DESCARTADO (94%)
 
-Nota: 7,75 GB es el 94% de la VRAM. Entra, pero sin margen: no caben dos modelos
-(el wrapper ya fuerza 1 unico modelo) y un segundo consumidor de VRAM haria
-fallar la carga. Si se quiere holgura, bajar OLMoE a 16384 deja 1,79 GB libres.
+**Por que 16384 y no 32768:**
 
-**Autopsia del 32768 con f16:** 4,0 GB (pesos Q4_K_M) + 4,0 GB (KV) + buffers de
-computo/logits > 8,19 GB -> el motor no completa el handshake. Cuadra con lo
-medido a 8192: 4,0 + 1,0 = 5,02 GB.
+1. OLMoE no gana calidad por encima de 4096; 16384 ya es 4x su contexto de
+   entrenamiento y cubre de sobra system prompt + esquemas de tools + historial.
+2. A 32768 el margen cae a ~0,45 GB, y este contenedor tiene un fallo conocido
+   de oversubscription: el wrapper puede lanzar 2-3 `llama-server.real` en
+   paralelo por la carrera de arranque, y con la VRAM al limite eso da
+   "Engine protocol startup was aborted" mas teardown sucio del kernel
+   ("failed to clear page tables on GEM object close (-512)", "leaking bo va"),
+   que es el estado previo a un wedge que exigiria cold boot fisico.
+
+Para volver a 32768 hay que forzar `--cache-type-k q8_0` (V no se puede
+cuantizar: exige `--flash-attn`, aqui forzado off) y aceptar el margen de
+0,45 GB. Estuvo configurado y verificado funcionando el 2026-10-04; se descarto
+por el margen.
 
 **Para contexto largo de verdad** (OpenInterpreter/OpenWebUI mandan system prompt
 + esquemas de tools) el modelo correcto es **Qwen3-1.7B**, nativo 32768, ya
-servido en :1235. OLMoE no pasa de 4096 sin degradar, haga lo que haga la config.
+servido en :1235.
 
-**Aparte, preexistente y no relacionado con el ctx:** la logica de "1 unico
-modelo" del wrapper (lineas ~148-169) puede matar la instancia recien lanzada en
-la carrera de arranque -> el primer request devuelve 400
-`{"error":"terminated"}`; el reintento entra (verificado 2026-10-04). Afecta a
-OpenWebUI/OpenInterpreter al cambiar de modelo. Pendiente de revisar.
+**Aparte, preexistente y pendiente:** la carrera de arranque del wrapper hace
+que el primer request tras cambiar de modelo pueda devolver 400
+`{"error":"terminated"}` o HTTP 000. El reintento entra siempre (verificado en
+todas las pruebas del 2026-10-04). Afecta a OpenWebUI/OpenInterpreter al cambiar
+de modelo.
