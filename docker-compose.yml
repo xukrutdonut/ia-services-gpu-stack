@@ -239,6 +239,10 @@ services:
       - lms_amd_profile:/root/.lmstudio
       - /home/arkantu/modelos/rx480:/root/.lmstudio/models/rx480:ro
       - ./ia-gpu-amd-rx480/entrypoint.sh:/root/lms-amd-entrypoint.sh:ro
+      # Bench seguro: loader/unloader con guardas anti-cuelgue (bench-run.sh).
+      - ./ia-gpu-amd-rx480/bench:/opt/bench:ro
+      - ./ia-gpu-amd-rx480/bench-bin:/opt/llama-bench:ro
+      - ./ia-gpu-amd-rx480/results:/opt/bench-results
     devices:
       - /dev/dri/card1:/dev/dri/card1
       - /dev/dri/renderD128:/dev/dri/renderD128

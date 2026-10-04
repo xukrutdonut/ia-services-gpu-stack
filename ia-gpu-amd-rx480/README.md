@@ -120,3 +120,51 @@ Con `gpu-watchdog` configurado a 300s y aislamiento de Vulkan activo:
 | **Ministral 8B Instruct** | `ministral-8b-instruct-2410` | **21.07 tok/s** | 265 | 0.329s | 3.1s |
 | **Qwen 1.5 MoE A2.7B Chat** | `qwen1.5-moe-a2.7b-chat` | **11.43 tok/s** | 409 | 0.824s | 16.2s |
 
+> Nota: las tablas de arriba son historicas (periodos en que la tarjeta estaba
+> sana). Tras el wedge de la RX 480 (ring timeouts + PRT, requiere cold boot)
+> no hay ninguna medida valida; la referencia sera el primer `bench-run.sh`
+> limpio posterior al cold boot.
+
+## Bench seguro (`bench-run.sh`)
+
+Protocolo anti-cuelgue para medir la RX 480 sin volver a tumbarla:
+
+```bash
+cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
+./bench-run.sh --check      # diagnostico (host, NO toca la GPU)
+./bench-run.sh              # bench completo (3 modelos, carga minima)
+./bench-run.sh --dry-run    # imprime el plan y sale
+./bench-run.sh --canary-only
+./bench-run.sh --models 0.6b,1.7b
+```
+
+### Que garantiza
+- **Carga minima**: `-p 64 -n 32 -r 1 -b 64 -ub 16`, un modelo por invocacion
+  (carga -> mide -> descarga). Son segundos de computo, muy por debajo del
+  umbral documentado (~10-13 min de computo sostenido) que dispara el fallo.
+- **Submits cortos**: `GGML_VK_MAX_NODES_PER_SUBMIT=1` + `GGML_VK_DISABLE_ASYNC=1`
+  (heredados del compose), que era la causa del gfxhub/ring timeout.
+- **Lock exclusivo** (`flock`): nunca dos benches a la vez (el error que colgo la GPU).
+- **GPU libre**: rechaza arrancar con un `llama-server.real` vivo; `lms unload --all`
+  antes y despues.
+- **Canary**: prueba de vida con carga minima antes del bench; si no responde, aborta.
+- **Timeout duro por modelo** (180 s): si expira, mata y **aborta todo** sin reintentar.
+- **Vigilancia de `devcoredump`**: si amdgpu vuelca un coredump, aborta al instante.
+- **Sin `vulkaninfo`**: prohibido en esta maquina (re-dispara el PRT).
+- **Telemetria segura**: solo VRAM/`pp_dpm_sclk` por sysfs (lecturas DRM).
+  Temp/fan/potencia (hwmon = SMU) solo con `--telemetry`, una vez por modelo.
+
+### Codigos de salida
+`0` ok · `2` abortado (timeout/señal) · `3` GPU wedgeada (cold boot) ·
+`4` preflight fallo · `5` otro bench en marcha · `6` modelo desconocido.
+
+### Tras un cold boot
+```bash
+cd ~/produccion/ia-services-stack && docker compose up -d ia-gpu-amd-rx480
+cd ia-gpu-amd-rx480 && ./bench-run.sh
+```
+El contenedor se recrea con la imagen nueva (python3) y los montajes
+`bench/`, `bench-bin/` y `results/`. Resultados en `results/`.
+`lms_amd_profile` es un volumen con nombre: recrear no borra llmster ni el
+backend Vulkan.
+

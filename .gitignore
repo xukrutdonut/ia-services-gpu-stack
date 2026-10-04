@@ -19,6 +19,12 @@ lm-chat/data/
 *.so.*
 *.bin
 
+# Bench RX480: binario upstream llama-bench (~86 MB; usar bench-fetch-bin.sh)
+ia-gpu-amd-rx480/bench-bin/
+# Bench RX480: resultados generados
+ia-gpu-amd-rx480/results/*
+!ia-gpu-amd-rx480/results/.gitkeep
+
 # Python
 __pycache__/
 *.pyc
