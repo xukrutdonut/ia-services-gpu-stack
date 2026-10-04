@@ -171,34 +171,47 @@ suelta (exit `3`, cold boot).
 
 ---
 
-## 8. Contexto de OLMoE en OpenWebUI/OpenInterpreter — 2026-10-04
+## 8. Contexto de OLMoE en OpenWebUI/OpenInterpreter - 2026-10-04
 
-**Hecho duro:** OLMoE-1B-7B-Instruct declara `n_ctx_train = 4096` (llama.cpp lo
-imprime al cargar). No es un límite de config nuestra: más allá de 4096 tokens el
-modelo extrapola RoPE y la calidad se degrada. Ninguna config lo cambia.
+**Hecho duro:** OLMoE-1B-7B-Instruct tiene `n_ctx_train = 4096` (lo declara el
+GGUF; llama.cpp lo avisa al cargar). No es un limite de config: por encima de
+4096 el modelo extrapola RoPE y la calidad se degrada. La config solo decide si
+la API **rechaza** el prompt (ctx 4096) o lo **acepta degradado** (ctx 8192+).
 
-**Por qué el suelo de `--ctx-size` es 8192 y no 4096:** LM Studio pide 4096 para
-OLMoE (su `max_context_length`), y con 4096 OpenWebUI/OpenInterpreter rechazan
-cualquier prompt >4096 con error de contexto. El suelo eleva la petición a 8192
-para que no fallen; el aviso `n_ctx_seq (8192) > n_ctx_train (4096) -- possible
-training context overflow` se **acepta** como trade-off (calidad peor pasado 4096,
-pero peticiones no rechazadas). Bajar el suelo a 4096 se probó y se revirtió:
+**Por que hay suelo:** LM Studio pide 4096 a OLMoE (`max_context_length` del
+GGUF), y con 4096 OpenWebUI/OpenInterpreter rechazan cualquier prompt >4096. El
+wrapper eleva la peticion para que no fallen.
 
-> el 2026-10-04 se bajó a 4096 (para "respetar" n_ctx_train) y **rompía
-> OpenWebUI/OpenInterpreter** → revertido a 8192 el mismo día. El comentario del
-> código, que antes decía "el modelo lo limita por sí mismo", era falso y se
-> corrigió.
+**Suelo por modelo** (rama `--ctx-size` del wrapper en `entrypoint.sh`):
+- Embeddings -> sin suelo (ctx nativo corto; forzar 16k solo gastaria VRAM).
+- OLMoE -> 32768 con el KV-K en `q8_0` (V no se puede cuantizar: exige
+  `--flash-attn`, aqui forzado off por estabilidad en Polaris).
+- Resto (Qwen3, etc.) -> suelo 16384; LM Studio ya les pide 32768.
 
-**VRAM medida** (RX480 8 GiB, OLMoE@8192 residente): `mem_info_vram_used`
-**5024 MiB / 8190 MiB** → ~3,1 GiB libres. KV de OLMoE ≈ 0,8 GiB a 8192
-(~98 KB/token). Techo práctico por VRAM:
+**VRAM medida** (RX480, 8,19 GB reales). KV de OLMoE = 128 KB/token
+(16 capas x 16 cabezas KV x 128 dim x 2 (K+V) x 2 B):
 
-| ctx OLMoE | VRAM usada aprox | margen |
-|-----------|------------------|--------|
-| 8192      | ~5,0 GiB         | estado actual |
-| 16384     | ~6,0 GiB         | ~2 GiB libres |
-| 32768     | ~7,2 GiB         | fits justo, sin sitio para 2 modelos |
+| config                       | VRAM usada | libre   | resultado |
+|------------------------------|-----------:|--------:|-----------|
+| OLMoE @8192,  KV f16         | 5,02 GB    | 3,17 GB | OK |
+| OLMoE @16384, KV f16         | 6,40 GB    | 1,79 GB | OK |
+| OLMoE @32768, KV f16         | >8,19 GB   | -       | NO ARRANCA ("Engine protocol startup was aborted") |
+| OLMoE @32768, K q8_0 / V f16 | 7,75 GB    | 0,44 GB | OK  <- estado actual |
 
-**Recomendación:** para contexto largo real (OpenInterpreter/OpenWebUI mandan
-system prompt + esquemas de tools) usar **Qwen3-1.7B**, nativo 32768 y ya servido
-por la API :1235. OLMoE es un modelo de contexto corto por entrenamiento.
+Nota: 7,75 GB es el 94% de la VRAM. Entra, pero sin margen: no caben dos modelos
+(el wrapper ya fuerza 1 unico modelo) y un segundo consumidor de VRAM haria
+fallar la carga. Si se quiere holgura, bajar OLMoE a 16384 deja 1,79 GB libres.
+
+**Autopsia del 32768 con f16:** 4,0 GB (pesos Q4_K_M) + 4,0 GB (KV) + buffers de
+computo/logits > 8,19 GB -> el motor no completa el handshake. Cuadra con lo
+medido a 8192: 4,0 + 1,0 = 5,02 GB.
+
+**Para contexto largo de verdad** (OpenInterpreter/OpenWebUI mandan system prompt
++ esquemas de tools) el modelo correcto es **Qwen3-1.7B**, nativo 32768, ya
+servido en :1235. OLMoE no pasa de 4096 sin degradar, haga lo que haga la config.
+
+**Aparte, preexistente y no relacionado con el ctx:** la logica de "1 unico
+modelo" del wrapper (lineas ~148-169) puede matar la instancia recien lanzada en
+la carrera de arranque -> el primer request devuelve 400
+`{"error":"terminated"}`; el reintento entra (verificado 2026-10-04). Afecta a
+OpenWebUI/OpenInterpreter al cambiar de modelo. Pendiente de revisar.

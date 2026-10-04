@@ -180,6 +180,8 @@ export DRI_PRIME=1
 
 NEW_ARGS=()
 SKIP_NEXT=0
+MODEL_PATH=""
+KVK_Q8=0
 for ((i=1; i<=$#; i++)); do
     if [ "$SKIP_NEXT" -eq 1 ]; then
         SKIP_NEXT=0
@@ -200,22 +202,50 @@ for ((i=1; i<=$#; i++)); do
             NEW_ARGS+=("$arg" "1")
             SKIP_NEXT=1
             ;;
+        --cache-type-k|-ctk)
+            # KV-K a q8_0 SOLO cuando hace falta (OLMoE a 32768): ahorra la mitad
+            # del K (2,0 -> 1,0 GB a 32768) y es lo que hace que quepa en 8 GB.
+            # V no se cuantiza: llama.cpp exige --flash-attn para V y aqui esta
+            # forzado off por estabilidad (Polaris). f16 para K y V en el resto.
+            if [ "$KVK_Q8" = 1 ]; then
+                NEW_ARGS+=("$arg" "q8_0")
+            else
+                NEW_ARGS+=("$arg" "$next_arg")
+            fi
+            SKIP_NEXT=1
+            ;;
         --ctx-size|-c)
-            # Cap a 32768. RX480 8GB VRAM: Qwen3-1.7B Q4_K_M (~1.2GB) + KV cache f16
-            # a 32768 tokens (~3.5GB) = ~4.7GB total, cabe holgado.
-            # Suelo 8192 (NO bajar a 4096): LM Studio pide 4096 para OLMoE
-            # (su max_context_length), pero con 4096 OpenWebUI/OpenInterpreter
-            # rechazan cualquier prompt >4096 con error de contexto. El suelo
-            # eleva la peticion a 8192 para que no fallen; cabe en VRAM
-            # (OLMoE Q4 ~4.0GB + KV f16 8192 ~1.1GB = ~5.1GB de 8GB).
-            # Efecto secundario ACEPTADO: llama.cpp avisa
-            # "n_ctx_seq (8192) > n_ctx_train (4096) -- possible training
-            # context overflow". Mas alla de 4094 tokens la calidad de OLMoE
-            # se degrada, pero las peticiones no se rechazan.
+            # Cap 32768 (RX480 8 GB, 8,19 GB reales). Suelo por modelo:
+            #  - Embeddings: sin suelo (ctx nativo corto, nadie les manda prompts
+            #    largos; forzarles 16k solo gastaria VRAM).
+            #  - OLMoE: 32768 con K del KV en q8_0 (~450 MB de VRAM libres).
+            #  - Resto: 16384.
+            # Motivo del suelo: LM Studio pide 4096 a OLMoE (max_context_length
+            # del GGUF) y con 4096 OpenWebUI/OpenInterpreter rechazan cualquier
+            # prompt >4096. OLMoE tiene n_ctx_train=4096: por encima la calidad
+            # degrada (RoPE extrapolado) pero la peticion NO se rechaza.
+            # Trade-off aceptado y documentado en PENDIENTE-BENCH-RX480.md §8.
+            # VRAM MEDIDA (2026-10-04, KV de OLMoE = 128 KB/token: 16 capas x 16
+            # cabezas KV x 128 dim x 2 (K+V) x 2 B; pesos Q4_K_M ~4,0 GB):
+            #   8192  f16    -> 5,02 GB  (medido; 4,0 + 1,0 KV)
+            #   16384 f16    -> 6,40 GB  (medido; ~1,8 GB libres)
+            #   32768 f16    -> NO ARRANCA: 8,0 GB+ de KV+pesos+buffers >
+            #                   8,19 GB -> "Engine protocol startup was aborted"
+            #   32768 K/q8_0 -> 7,75 GB  (medido; 94% VRAM, ~0,45 GB libres)
+            FLOOR=16384
+            KVK_Q8=0
+            case "$MODEL_PATH" in
+                # Embeddings: sin suelo (ctx nativo corto, nadie les manda prompts largos).
+                *mbed*) FLOOR=0;;
+                # OLMoE: 32768 solo cabe con K del KV en q8_0 (ver nota de arriba).
+                # 16384 f16 -> ~6,4 GB medidos; 32768 f16 -> no arranca. Con K q8_0
+                # el KV baja de 4,0 a 3,0 GB (V no se puede cuantizar sin flash-attn).
+                *[Oo][Ll][Mm][Oo][Ee]*) FLOOR=32768; KVK_Q8=1;;
+            esac
             if [ -n "$next_arg" ] && [ "$next_arg" -gt 32768 ] 2>/dev/null; then
                 NEW_ARGS+=("$arg" "32768")
-            elif [ -n "$next_arg" ] && [ "$next_arg" -lt 8192 ] 2>/dev/null; then
-                NEW_ARGS+=("$arg" "8192")
+            elif [ "$FLOOR" -gt 0 ] && [ -n "$next_arg" ] && [ "$next_arg" -lt "$FLOOR" ] 2>/dev/null; then
+                NEW_ARGS+=("$arg" "$FLOOR")
             else
                 NEW_ARGS+=("$arg" "$next_arg")
             fi
@@ -244,6 +274,13 @@ for ((i=1; i<=$#; i++)); do
                 NEW_ARGS+=("$arg" "$next_arg")
             fi
             SKIP_NEXT=1
+            ;;
+        --model|-m)
+            # Guardamos la ruta para que el suelo de --ctx-size pueda ser
+            # selectivo (los embeddings no lo llevan). El valor va detras y cae
+            # en el caso *) de la siguiente vuelta, como antes.
+            MODEL_PATH="$next_arg"
+            NEW_ARGS+=("$arg")
             ;;
         *)
             NEW_ARGS+=("$arg")
