@@ -8,6 +8,8 @@
 #   ./bench-run.sh --canary-only    # solo la prueba de vida
 #   ./bench-run.sh --models 0.6b,1.7b
 #   ./bench-run.sh --telemetry      # incluye temp/fan/potencia (SMU)
+#   ./bench-run.sh --stress         # estres sostenido ~15 min (Causa C)
+#   ./bench-run.sh --stress --stress-minutes 30 --stress-gen 2048
 #
 # El diagnostico previo corre en el host (ve el mismo /sys que el contenedor).
 # Si no esta limpio (ring timeouts en el arranque, coredump pendiente, o la
@@ -70,8 +72,8 @@ docker exec -i "$CONT" /opt/bench/bench_rx480.py "$@"
 rc=$?
 echo "==========================================================="
 case "$rc" in
-    0) echo ">> OK: resultados en ${HERE}/results/" ;;
-    2) echo ">> ABORTADO (timeout o señal de la GPU). Revisa el .json y el dmesg." ;;
+    0) echo ">> OK: resultados en ${HERE}/results/ (bench-*.json o stress-*.json)" ;;
+    2) echo ">> ABORTADO. Si fue --stress, Causa C reproducida: cold boot obligatorio." ;;
     3) echo ">> GPU WEDGED: no muere el proceso. Cold boot obligatorio." ;;
     4) echo ">> preflight fallo: la GPU no responde a la carga minima. Cold boot." ;;
     5) echo ">> ya hay otro bench en marcha." ;;

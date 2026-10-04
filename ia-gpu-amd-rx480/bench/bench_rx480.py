@@ -30,6 +30,21 @@ Uso
   [cont] /opt/bench/bench_rx480.py --canary-only     # solo prueba de vida
   [cont] /opt/bench/bench_rx480.py --models 0.6b,1.7b
   [cont] /opt/bench/bench_rx480.py --telemetry       # lee temp/fan/potencia (SMU)
+  [cont] /opt/bench/bench_rx480.py --stress          # estres sostenido (Causa C)
+
+Modo --stress (validar la Causa C: fallo por computo sostenido)
+==============================================================
+El bench normal mide con cargas de segundos y NO ejercita el fallo a los
+~10-13 min. `--stress` hace lo contrario: chunks de decodificacion larga
+back-to-back durante N minutos (por defecto 15) con un vigilante del kernel log
+que ABORTA al instante ante el primer evento nuevo (`ring ... timeout`,
+`Disabling VM faults`, `GPU reset`, page fault o spam de `failed ret is 65535`),
+antes de que el proceso caiga en estado D. Tambien aborta por coredump, por
+chunk que excede su timeout, por bloqueo tras SIGKILL (exit 3 = wedge) y por
+degradacion sostenida de tg tok/s (proxy de la SMU/relojes muriendo).
+Escribe `results/stress-<fecha>.{json,md}` con la linea temporal de chunks.
+Veredicto 0 = aguanto el estres con las mitigaciones actuales (Causa C no
+reproducida); 2 = senal de GPU o degradacion (Causa C reproducida).
 
 Codigos de salida
 =================
@@ -45,6 +60,7 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -86,9 +102,55 @@ DEFAULTS = dict(prompt=64, gen=32, batch=64, ubatch=16, reps=1,
                 per_model_timeout=180, canary_timeout=120, cooldown=20,
                 total_budget=1200, ngl=99)
 
+# Estres sostenido (Causa C). El prompt/gen grandes son deliberados: aqui NO
+# aplican los limites "seguros" del bench normal.
+STRESS_DEFAULTS = dict(minutes=15, prompt=512, gen=1024, chunk_timeout=420,
+                       cooldown=3, degrade_ratio=0.5, degrade_streak=2,
+                       model="1.7b")
+
+# Eventos del kernel que delatan el fallo (Causa A/B/C). El texto
+# 'GPU recovery disabled.' NO esta aqui: es ruido de init del driver.
+FATAL_PATTERNS = [
+    ("ring timeout", r"ring .* timeout"),
+    ("PRT / VM faults", r"Disabling VM faults"),
+    ("GPU reset", r"GPU reset"),
+    ("page fault", r"amdgpu.*[Pp]age fault"),
+    ("SMU sin respuesta", r"failed ret is 65535"),
+]
+
 
 def log(msg):
     print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+
+
+def read_klog():
+    """Kernel log de este arranque. Devuelve (lineas, fuente) o (None, None).
+
+    En el HOST: 'journalctl -k' funciona sin sudo si el usuario esta en 'adm'
+    o 'systemd-journal'. En el CONTENEDOR no hay journalctl, asi que se usa
+    'dmesg' (necesita CAP_SYSLOG, que el servicio recibe via cap_add) o el
+    journal del host si se monto ('journalctl -D /host-journal').
+    """
+    cands = (("journalctl -k", ["journalctl", "-k", "-b", "--no-pager"]),
+             ("journalctl -D host", ["journalctl", "-D", "/host-journal",
+                                     "-k", "-b", "--no-pager"]),
+             ("dmesg", ["dmesg", "-T"]),
+             ("sudo -n dmesg", ["sudo", "-n", "dmesg", "-T"]))
+    for name, cmd in cands:
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if p.returncode == 0 and p.stdout:
+            return p.stdout.splitlines(), name
+    return None, None
+
+
+def klog_fatal_counts(lines):
+    out = {}
+    for name, pat in FATAL_PATTERNS:
+        out[name] = sum(1 for l in lines if re.search(pat, l))
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -186,34 +248,21 @@ def cmd_check(args):
     if args.telemetry:
         print("  telemetria    : %s" % hwmon_telemetry(base))
 
-    # 1) kernel log: ring timeouts / PRT / SMU muerta desde el arranque.
-    #    'journalctl -k' funciona sin sudo si el usuario esta en 'adm' o
-    #    'systemd-journal'; dmesg y 'sudo -n dmesg' son alternativas.
-    klog, klog_src = None, None
-    for name, cmd in (("journalctl -k", ["journalctl", "-k", "-b", "--no-pager"]),
-                      ("dmesg", ["dmesg", "-T"]),
-                      ("sudo -n dmesg", ["sudo", "-n", "dmesg", "-T"])):
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if p.returncode == 0 and p.stdout:
-            klog, klog_src = p.stdout, name
-            break
+    klog, klog_src = read_klog()
     if klog is None:
         print("  kernel log    : NO accesible (journalctl -k / dmesg / sudo -n). "
               "El canary hara de prueba de vida.")
     else:
-        lines = klog.splitlines()
-        # Fatales: ring timeout real y PRT ('Disabling VM faults' deja la GPU
-        # sin red de seguridad). 'GPU recovery disabled.' es ruido de INIT del
-        # driver con gpu_recovery=0 (se imprime 2x en cada arranque limpio, antes
+        counts = klog_fatal_counts(klog)
+        # Fatales para el veredicto: ring timeout real y PRT ('Disabling VM
+        # faults' deja la GPU sin red de seguridad). 'failed ret is 65535'
+        # (SMU muda) solo es fatal en spam. 'GPU recovery disabled.' es ruido
+        # de INIT del driver con gpu_recovery=0 (2x por arranque limpio, antes
         # de 'hwmgr_sw_init'); NO es una recuperacion y no debe contar.
-        hits = [l for l in lines
+        hits = [l for l in klog
                 if re.search(r"ring .* timeout|Disabling VM faults", l)]
-        boot_noise = sum(1 for l in lines if "GPU recovery disabled." in l)
-        spam = sum(1 for l in lines if "failed ret is 65535" in l)
-        print("  kernel log    : via %s" % klog_src)
+        boot_noise = sum(1 for l in klog if "GPU recovery disabled." in l)
+        spam = counts.get("SMU sin respuesta", 0)
         if hits:
             verdict_ok = False
             print("  !! RING TIMEOUTS / PRT en este arranque (%d):" % len(hits))
@@ -255,6 +304,61 @@ class Abort(Exception):
     def __init__(self, msg, code=2):
         super().__init__(msg)
         self.code = code
+
+
+class KlogWatcher(threading.Thread):
+    """Vigila el kernel log durante el estres.
+
+    Captura un baseline al arrancar y, en cada vuelta, marca `fired` en cuanto
+    aparece cualquier evento fatal NUEVO (ring timeout, PRT, reset, page fault
+    o spam de 'failed ret is 65535'). Pensado para abortar el estres ANTES de
+    que el proceso caiga en estado D y la tarjeta quede irrecuperable en
+    caliente. Si el kernel log no es accesible, queda `available=False`.
+    """
+
+    SMU_SPAM = 5
+
+    def __init__(self, interval=1.5):
+        super().__init__(daemon=True)
+        self.interval = interval
+        self.fired = threading.Event()
+        self.reason = None
+        self.hits = []
+        self.src = None
+        self.available = False
+        self._base = {}
+
+    def _fire(self, name, delta):
+        self.reason = "%s (+%d lineas nuevas)" % (name, delta)
+        lines, _ = read_klog()
+        if lines:
+            pat = "|".join(p for _, p in FATAL_PATTERNS)
+            self.hits = [l.strip() for l in lines if re.search(pat, l)][-4:]
+        self.fired.set()
+
+    def run(self):
+        lines, src = read_klog()
+        if lines is None:
+            log("aviso KlogWatcher: kernel log inaccesible; solo quedan el "
+                "coredump y un chunk colgado como centinelas")
+            return
+        self.available, self.src = True, src
+        self._base = klog_fatal_counts(lines)
+        while not self.fired.is_set():
+            time.sleep(self.interval)
+            cur_lines, _ = read_klog()
+            if cur_lines is None:
+                continue
+            cur = klog_fatal_counts(cur_lines)
+            for name, _pat in FATAL_PATTERNS:
+                delta = cur.get(name, 0) - self._base.get(name, 0)
+                if delta <= 0:
+                    continue
+                if name == "SMU sin respuesta" and delta <= self.SMU_SPAM:
+                    continue
+                self._fire(name, delta)
+                return
+            self._base = cur
 
 
 class Sampler(threading.Thread):
@@ -308,8 +412,12 @@ def ensure_gpu_free():
         log("aviso: sigue habiendo llama-server.real: %s" % left)
 
 
-def run_llama_bench(binary, model_path, a, label):
-    """Ejecuta llama-bench para UN modelo con timeout duro y vigilancia."""
+def run_llama_bench(binary, model_path, a, label, watcher=None):
+    """Ejecuta llama-bench para UN modelo con timeout duro y vigilancia.
+
+    Si se pasa `watcher` (KlogWatcher), ademas se aborta en cuanto aparece un
+    evento fatal NUEVO en el kernel log (ring timeout, PRT, reset...).
+    """
     args = [binary, "-m", model_path, "-ngl", str(a.ngl),
             "-p", str(a.prompt), "-n", str(a.gen), "-r", str(a.reps),
             "-b", str(a.batch), "-ub", str(a.ubatch), "-o", "json"]
@@ -335,7 +443,12 @@ def run_llama_bench(binary, model_path, a, label):
         while True:
             if p.poll() is not None:
                 break
-            time.sleep(2)
+            # 1 s con vigilante de kernel (aborta rapido); 2 s sin el.
+            time.sleep(1 if watcher is not None else 2)
+            if watcher is not None and watcher.fired.is_set():
+                status = "abortado"
+                note = "senal GPU en el kernel: %s" % watcher.reason
+                break
             if devcd_entries() - base_cd:
                 status = "abortado"
                 note = "amdgpu volco un coredump durante el bench"
@@ -581,6 +694,213 @@ def utf_node():
 
 
 # --------------------------------------------------------------------------
+# Estres sostenido (Causa C: fallo por computo sostenido)
+# --------------------------------------------------------------------------
+def cmd_stress(args):
+    binary = find_binary()
+    if not binary:
+        log("FAIL: no encuentro llama-bench. Probados: %s" % BENCH_CANDIDATES)
+        return 4
+    keys = [k.strip() for k in args.models.split(",") if k.strip()] or \
+        [STRESS_DEFAULTS["model"]]
+    missing = [k for k in keys if k not in MODELS]
+    if missing:
+        log("FAIL: modelos desconocidos: %s (validos: %s)"
+            % (missing, ",".join(MODELS)))
+        return 6
+    k = keys[0]
+    path = os.path.join(MODELS_DIR, MODELS[k])
+    if not os.path.isfile(path):
+        log("FAIL: falta el modelo %s" % path)
+        return 6
+
+    log("ESTRES: modelo %s durante %d min (Causa C: fallo por computo sostenido)"
+        % (k, args.stress_minutes))
+    log("carga: -p %d -n %d -b %d -ub %d -ngl %d — fuera de los limites "
+        "\"seguros\" del bench normal (es el objetivo)"
+        % (args.stress_prompt, args.stress_gen, args.batch, args.ubatch,
+           args.ngl))
+
+    if args.dry_run:
+        log("--dry-run: no ejecuto nada.")
+        return 0
+
+    lf = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("FAIL: ya hay un bench en marcha (lock %s)" % LOCK_FILE)
+        return 5
+
+    base = find_amd_card()
+    if not base:
+        log("FAIL: no encuentro la RX 480")
+        return 4
+
+    t0 = time.time()
+    deadline = t0 + args.stress_minutes * 60
+    chunks, verdict, reason, watcher = [], None, None, None
+    try:
+        log("liberando GPU...")
+        ensure_gpu_free()
+
+        log("canary: prueba de vida (-p 8 -n 8)...")
+        ca = argparse.Namespace(**vars(args))
+        ca.prompt, ca.gen, ca.reps = 8, 8, 1
+        ca.per_model_timeout = args.canary_timeout
+        r = run_llama_bench(binary, path, ca, "canary")
+        if r["status"] != "ok":
+            raise Abort("canary fallo: %s" % r.get("note", ""), 4)
+        log("canary OK (%ss)" % r["elapsed_s"])
+        time.sleep(args.cooldown)
+
+        watcher = KlogWatcher(interval=1.5)
+        watcher.start()
+        time.sleep(2)  # deja que capture el baseline
+        if not watcher.available:
+            log("aviso: sin kernel log; centinelas = coredump + chunk colgado")
+
+        idx, streak, ref = 0, 0, None
+        while time.time() < deadline:
+            idx += 1
+            sa = argparse.Namespace(**vars(args))
+            sa.prompt, sa.gen = args.stress_prompt, args.stress_gen
+            sa.per_model_timeout = args.stress_chunk_timeout
+            log("-- chunk %d (t+%ds) --" % (idx, int(time.time() - t0)))
+            rr = run_llama_bench(binary, path, sa, "stress%d" % idx,
+                                 watcher=watcher)
+            rr["chunk"] = idx
+            rr["t_offset_s"] = round(time.time() - t0, 1)
+            chunks.append(rr)
+            log("   pp%s=%s tg%s=%s vram=%sMiB sclk=%s (%ss)"
+                % (rr.get("pp_n", "?"), rr.get("pp_ts", "-"),
+                   rr.get("tg_n", "?"), rr.get("tg_ts", "-"),
+                   rr.get("peak_vram_mib", "-"), rr.get("sclk", "-"),
+                   rr.get("elapsed_s", "-")))
+
+            if watcher.fired.is_set():
+                reason = "senal de la GPU: %s" % watcher.reason
+                verdict = "gpu-signal"
+                break
+            if rr["status"] != "ok":
+                reason = rr.get("note", "abortado")
+                verdict = "abortado"
+                break
+
+            tg = rr.get("tg_ts")
+            if tg:
+                if ref is None:
+                    ref = tg
+                if tg < ref * args.stress_degrade_ratio:
+                    streak += 1
+                    log("   aviso: tg %s < %d%% de %s (racha %d)"
+                        % (tg, int(args.stress_degrade_ratio * 100), ref, streak))
+                    if streak >= args.stress_degrade_streak:
+                        reason = ("degradacion sostenida: tg cayo a %s tok/s "
+                                  "(referencia %s)" % (tg, ref))
+                        verdict = "degradado"
+                        break
+                else:
+                    streak = 0
+            if time.time() < deadline:
+                time.sleep(args.stress_cooldown)
+        if verdict is None:
+            verdict = "superado"
+            reason = "sin senales de GPU en %d min de computo sostenido" \
+                % args.stress_minutes
+    except Abort as e:
+        verdict = {3: "wedged", 4: "preflight"}.get(e.code, "abortado")
+        reason = str(e)
+        log("##### ABORTADO (%s): %s" % (verdict, e))
+        stress_report(k, args, chunks, verdict, reason, t0, watcher)
+        ensure_gpu_free()
+        return e.code
+
+    log("descargando modelos...")
+    ensure_gpu_free()
+    stress_report(k, args, chunks, verdict, reason, t0, watcher)
+    log("VEREDICTO ESTRES: %s (%s)" % (verdict, reason))
+    if verdict == "superado":
+        log("=> aguanto %d min con las mitigaciones actuales: Causa C NO "
+            "reproducida" % args.stress_minutes)
+        return 0
+    log("=> Causa C REPRODUCIDA. Requiere cold boot antes de reusar la GPU.")
+    return 2
+
+
+def stress_report(model, args, chunks, verdict, reason, t0, watcher=None):
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tg = [c["tg_ts"] for c in chunks if c.get("tg_ts")]
+    payload = dict(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        kind="stress", model=model, verdict=verdict, reason=reason,
+        requested_minutes=args.stress_minutes,
+        sustained_s=round(time.time() - t0, 1),
+        chunks_done=len(chunks),
+        params=dict(prompt=args.stress_prompt, gen=args.stress_gen,
+                    batch=args.batch, ubatch=args.ubatch, ngl=args.ngl,
+                    cooldown_s=args.stress_cooldown),
+        tg_min=min(tg) if tg else None,
+        tg_max=max(tg) if tg else None,
+        tg_median=round(statistics.median(tg), 1) if tg else None,
+        klog_watcher=dict(available=bool(watcher and watcher.available),
+                          source=(watcher.src if watcher else None),
+                          reason=(watcher.reason if watcher else None)),
+        gpu_events=(watcher.hits if watcher else []),
+        vram_peak_mib=max([c.get("peak_vram_mib") or 0 for c in chunks] or [0])
+        or None,
+        host=utf_node(),
+        chunks=chunks,
+    )
+    j = os.path.join(RESULTS_DIR, "stress-%s.json" % stamp)
+    with open(j, "w") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    with open(os.path.join(RESULTS_DIR, "stress.jsonl"), "a") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    m = os.path.join(RESULTS_DIR, "stress-%s.md" % stamp)
+    with open(m, "w") as f:
+        f.write(render_stress_md(payload))
+    log("informe de estres -> %s (+ .md)" % j)
+
+
+def render_stress_md(payload):
+    c = payload["params"]
+    L = ["# Estres sostenido RX 480 (Causa C) — %s" % payload["timestamp"],
+         "",
+         "Modelo: `%s` · Host: `%s`" % (payload["model"],
+                                        payload.get("host", "?")),
+         "Veredicto: **%s** — %s" % (payload["verdict"], payload["reason"]),
+         "",
+         "Pedido: %d min · sostenido: %s s · chunks: %d"
+         % (payload["requested_minutes"], payload["sustained_s"],
+            payload["chunks_done"]),
+         "tg tok/s: min %s · mediana %s · max %s"
+         % (payload["tg_min"], payload["tg_median"], payload["tg_max"]),
+         "VRAM pico: %s MiB · kernel log: %s"
+         % (payload["vram_peak_mib"],
+            ("via %s" % payload["klog_watcher"]["source"])
+            if payload["klog_watcher"]["available"] else "NO accesible"),
+         "Protocolo chunk: `-p %(prompt)s -n %(gen)s -b %(batch)s "
+         "-ub %(ubatch)s -ngl %(ngl)s`, cooldown %(cooldown_s)s s" % c,
+         "",
+         "| Chunk | t+ (s) | pp tok/s | tg tok/s | VRAM pico (MiB) | sclk | "
+         "Tiempo (s) | Estado |",
+         "| ---: | ---: | ---: | ---: | ---: | :--- | ---: | :--- |"]
+    for r in payload["chunks"]:
+        L.append("| %s | %s | %s | %s | %s | %s | %s | %s |"
+                 % (r.get("chunk", "?"), r.get("t_offset_s", "-"),
+                    r.get("pp_ts", "-"), r.get("tg_ts", "-"),
+                    r.get("peak_vram_mib", "-"), r.get("sclk", "-"),
+                    r.get("elapsed_s", "-"), r.get("status", "?")))
+    if payload.get("gpu_events"):
+        L += ["", "Eventos de GPU capturados:", ""]
+        L += ["    %s" % e for e in payload["gpu_events"]]
+    L += ["", "Backend: Vulkan · detalle por chunk en el .json hermano.", ""]
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Bench seguro RX 480 (Vulkan)")
     ap.add_argument("--check", action="store_true",
@@ -603,8 +923,25 @@ def main():
     ap.add_argument("--canary-timeout", type=int, default=DEFAULTS["canary_timeout"])
     ap.add_argument("--cooldown", type=int, default=DEFAULTS["cooldown"])
     ap.add_argument("--total-budget", type=int, default=DEFAULTS["total_budget"])
+    ap.add_argument("--stress", action="store_true",
+                    help="estres sostenido para validar la Causa C")
+    ap.add_argument("--stress-minutes", type=int,
+                    default=STRESS_DEFAULTS["minutes"])
+    ap.add_argument("--stress-prompt", type=int,
+                    default=STRESS_DEFAULTS["prompt"])
+    ap.add_argument("--stress-gen", type=int, default=STRESS_DEFAULTS["gen"])
+    ap.add_argument("--stress-chunk-timeout", type=int,
+                    default=STRESS_DEFAULTS["chunk_timeout"])
+    ap.add_argument("--stress-cooldown", type=int,
+                    default=STRESS_DEFAULTS["cooldown"])
+    ap.add_argument("--stress-degrade-ratio", type=float,
+                    default=STRESS_DEFAULTS["degrade_ratio"])
+    ap.add_argument("--stress-degrade-streak", type=int,
+                    default=STRESS_DEFAULTS["degrade_streak"])
     args = ap.parse_args()
 
+    if args.stress:
+        return cmd_stress(args)
     if args.prompt > 256 or args.gen > 128:
         log("AVISO: peticion grande (-p %d -n %d). La tarjeta se cuelga con "
             "computo sostenido; usa valores <=256/128." % (args.prompt, args.gen))

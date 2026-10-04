@@ -152,6 +152,8 @@ cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
 ./bench-run.sh --dry-run    # imprime el plan y sale
 ./bench-run.sh --canary-only
 ./bench-run.sh --models 0.6b,1.7b
+./bench-run.sh --stress                     # estres sostenido ~15 min (Causa C)
+./bench-run.sh --stress --stress-minutes 30 --stress-gen 2048
 ```
 
 ### Que garantiza
@@ -166,12 +168,47 @@ cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
 - **Canary**: prueba de vida con carga minima antes del bench; si no responde, aborta.
 - **Timeout duro por modelo** (180 s): si expira, mata y **aborta todo** sin reintentar.
 - **Vigilancia de `devcoredump`**: si amdgpu vuelca un coredump, aborta al instante.
+- **Vigilancia del kernel log (en contenedor)**: durante `--stress` un hilo lee
+  `dmesg` cada 1,5 s y aborta al primer evento fatal *nuevo* (`ring ... timeout`,
+  `Disabling VM faults`, `GPU reset`, `[gfxhub] Page fault`, spam de
+  `failed ret is 65535`). Requiere `cap_add: SYSLOG` en el servicio (ya aplicado);
+  si no hay kernel log, avisa y el test sigue con coredump + chunk colgado.
 - **Sin `vulkaninfo`**: prohibido en esta maquina (re-dispara el PRT).
 - **Telemetria segura**: solo VRAM/`pp_dpm_sclk` por sysfs (lecturas DRM).
   Temp/fan/potencia (hwmon = SMU) solo con `--telemetry`, una vez por modelo.
 
+### Estres sostenido — Causa C (2026-10-04)
+
+El bench normal es de carga minima y no ejercita el fallo por computo sostenido
+(~10-13 min) que wedgeaba la tarjeta (Causa C). `--stress` corre el modelo en
+bucle, en chunks de `-p 512 -n 1024`, con vigilancia del kernel log y aborto.
+
+Corrida: modelo `1.7b`, 15 min pedidos / **905 s sostenidos**, 26 chunks.
+
+| Metrica | Valor |
+| :--- | ---: |
+| pp512 | 185.1 -> 167.1 tok/s (-9.7 %) |
+| tg1024 | 44.6 -> 42.3 tok/s (mediana 43.6) |
+| VRAM pico | 1182 MiB |
+| sclk bajo carga | 910-1310 MHz |
+| eventos fatales | 0 |
+
+**Veredicto: Causa C NO reproducida** con las mitigaciones actuales
+(`GGML_VK_MAX_NODES_PER_SUBMIT=1` + `GGML_VK_DISABLE_ASYNC=1`). Aguento 15 min
+seguidos, por encima del umbral documentado: sin `ring ... timeout`, sin PRT, sin
+coredump, SMU viva (46 C, fan 2183 rpm) y contenedor `healthy` al terminar. La
+deriva de pp/tg (~10 %/~5 %) es comportamiento termico normal, no fallo.
+
+Artefactos: `results/stress-20261004-093228.{json,md}` + `results/stress.jsonl`.
+
+> **Pendiente de decision (ablation)**: esto demuestra que *con* mitigacion no
+> cae, no que la mitigacion sea lo que lo evita. Para cerrar la Causa C del todo
+> hay que repetir el estres *sin* las `GGML_VK_*` y confirmar que wedgea; si
+> wedgea, exige cold boot (reinicio fisico).
+
 ### Codigos de salida
-`0` ok · `2` abortado (timeout/señal) · `3` GPU wedgeada (cold boot) ·
+`0` ok · `2` abortado (timeout, degradacion o señal de la GPU; en `--stress`,
+Causa C reproducida) · `3` GPU wedgeada (cold boot) ·
 `4` preflight fallo · `5` otro bench en marcha · `6` modelo desconocido.
 
 ### Tras un cold boot

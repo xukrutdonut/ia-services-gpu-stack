@@ -9,8 +9,8 @@
 > `--check` → LISTO, canary OK, bench completo OK (3/3 modelos). Sin timeouts
 > tras la corrida, `devcoredump` vacío, sclk coherente. Medidas reales en el
 > README y en `results/bench-20261004-090402.{json,md}`. `gpu-watchdog` v5.8
-> activo (ALLOW_SBR=0). Queda pendiente solo la Causa C (estrés sostenido), que
-> este bench de carga mínima no ejercita por diseño.
+> activo (ALLOW_SBR=0). **Causa C cerrada el mismo día** (ver §7): 15 min de
+> cómputo sostenido sin señales de GPU.
 > **Fix aplicado en este handoff:** el preflight trataba `GPU recovery disabled.`
 > como fatal (falso positivo en cada arranque con `gpu_recovery=0`); ahora es
 > ruido informativo y el harness también emite informe `.md`.
@@ -131,3 +131,40 @@ ia-gpu-amd-rx480/
 ```
 
 Commits: `8dd88dd` en `main` (github.com/xukrutdonut/ia-services-gpu-stack).
+
+---
+
+## 7. Cierre de la Causa C (estrés sostenido) — 2026-10-04
+
+El bench normal es de carga mínima y por diseño **no** ejercita el fallo por
+cómputo sostenido (~10-13 min) que wedgeaba la tarjeta. Se añadió `--stress`:
+
+```bash
+cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
+./bench-run.sh --stress                          # 15 min por defecto
+./bench-run.sh --stress --stress-minutes 30      # por si se quiere más
+```
+
+Qué hace: bucle de chunks `-p 512 -n 1024 -r 1` (submits largos, sin la
+"carga mínima" del bench normal) hasta agotar `--stress-minutes`, con
+**vigilancia del kernel log dentro del contenedor** (`cap_add: SYSLOG` añadido al
+servicio → `dmesg -T` funciona; antes no había ni `journalctl` ni permiso).
+
+Aborta (exit `2`) al primer evento fatal *nuevo*: `ring ... timeout`,
+`Disabling VM faults`, `GPU reset`, `[gfxhub] Page fault`, o >5 líneas nuevas de
+`failed ret is 65535`. También si el `tg` cae por debajo del 50 % de referencia
+durante 2 chunks seguidos (degradación) o si un chunk se cuelga / la GPU no
+suelta (exit `3`, cold boot).
+
+**Resultado** (`results/stress-20261004-093228.{json,md}`): modelo `1.7b`,
+905 s sostenidos, 26 chunks. `pp512` 185→167 tok/s (-10 %), `tg1024` 44.6→42.3
+(mediana 43.6), VRAM 1182 MiB, sclk 910-1310 MHz. **0 eventos fatales**,
+`devcoredump` vacío, SMU viva (46 C), contenedor `healthy` al acabar.
+
+**Veredicto: Causa C NO reproducida con las mitigaciones actuales**
+(`GGML_VK_MAX_NODES_PER_SUBMIT=1` + `GGML_VK_DISABLE_ASYNC=1`).
+
+> **Honestidad del resultado:** esto valida que *con* mitigación la tarjeta
+> aguanta — no que la mitigación sea lo que lo evita. La ablation (repetir el
+> estrés **sin** las `GGML_VK_*`) sigue sin hacer porque un wedge exige cold boot
+> (reinicio físico). Queda como decisión del usuario.
