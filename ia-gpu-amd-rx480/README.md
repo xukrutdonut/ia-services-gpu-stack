@@ -127,7 +127,8 @@ Con `gpu-watchdog` configurado a 300s y aislamiento de Vulkan activo:
 
 ## Bench seguro (`bench-run.sh`)
 
-Protocolo anti-cuelgue para medir la RX 480 sin volver a tumbarla:
+Protocolo anti-cuelgue para medir la RX 480 sin volver a tumbarla.
+Estado y handoff del cold boot: **[PENDIENTE-BENCH-RX480.md](PENDIENTE-BENCH-RX480.md)**.
 
 ```bash
 cd ~/produccion/ia-services-stack/ia-gpu-amd-rx480
