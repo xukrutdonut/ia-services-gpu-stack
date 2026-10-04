@@ -174,7 +174,9 @@ export GGML_VK_FORCE_MAX_ALLOCATION_SIZE=2147483648
 export AMDGPU_TARGETS="gfx803"
 export MESA_VK_DEVICE_SELECT="1002:67df!"
 export DRI_PRIME=1
-# RADV_PERFTEST y GGML_VK_ALLOW_EXOTIC ya exportados al inicio del entrypoint
+# RADV_PERFTEST y GGML_VK_ALLOW_EXOTIC NO se exportan aqui (se retiraron por
+# inestabilidad en Polaris; ver DIAGNOSTICO-RX480-2026-10-01.md). Lo que si se
+# exporta en esta linea son MESA_VK_DEVICE_SELECT / DRI_PRIME / gfx803.
 
 NEW_ARGS=()
 SKIP_NEXT=0
@@ -200,8 +202,16 @@ for ((i=1; i<=$#; i++)); do
             ;;
         --ctx-size|-c)
             # Cap a 32768. RX480 8GB VRAM: Qwen3-1.7B Q4_K_M (~1.2GB) + KV cache f16
-            # a 32768 tokens (~3.5GB) = ~4.7GB total, cabe holgado. OLMoE tiene
-            # max_context_length 4096, el modelo lo limita por si mismo.
+            # a 32768 tokens (~3.5GB) = ~4.7GB total, cabe holgado.
+            # Suelo 8192 (NO bajar a 4096): LM Studio pide 4096 para OLMoE
+            # (su max_context_length), pero con 4096 OpenWebUI/OpenInterpreter
+            # rechazan cualquier prompt >4096 con error de contexto. El suelo
+            # eleva la peticion a 8192 para que no fallen; cabe en VRAM
+            # (OLMoE Q4 ~4.0GB + KV f16 8192 ~1.1GB = ~5.1GB de 8GB).
+            # Efecto secundario ACEPTADO: llama.cpp avisa
+            # "n_ctx_seq (8192) > n_ctx_train (4096) -- possible training
+            # context overflow". Mas alla de 4094 tokens la calidad de OLMoE
+            # se degrada, pero las peticiones no se rechazan.
             if [ -n "$next_arg" ] && [ "$next_arg" -gt 32768 ] 2>/dev/null; then
                 NEW_ARGS+=("$arg" "32768")
             elif [ -n "$next_arg" ] && [ "$next_arg" -lt 8192 ] 2>/dev/null; then

@@ -168,3 +168,37 @@ suelta (exit `3`, cold boot).
 > aguanta — no que la mitigación sea lo que lo evita. La ablation (repetir el
 > estrés **sin** las `GGML_VK_*`) sigue sin hacer porque un wedge exige cold boot
 > (reinicio físico). Queda como decisión del usuario.
+
+---
+
+## 8. Contexto de OLMoE en OpenWebUI/OpenInterpreter — 2026-10-04
+
+**Hecho duro:** OLMoE-1B-7B-Instruct declara `n_ctx_train = 4096` (llama.cpp lo
+imprime al cargar). No es un límite de config nuestra: más allá de 4096 tokens el
+modelo extrapola RoPE y la calidad se degrada. Ninguna config lo cambia.
+
+**Por qué el suelo de `--ctx-size` es 8192 y no 4096:** LM Studio pide 4096 para
+OLMoE (su `max_context_length`), y con 4096 OpenWebUI/OpenInterpreter rechazan
+cualquier prompt >4096 con error de contexto. El suelo eleva la petición a 8192
+para que no fallen; el aviso `n_ctx_seq (8192) > n_ctx_train (4096) -- possible
+training context overflow` se **acepta** como trade-off (calidad peor pasado 4096,
+pero peticiones no rechazadas). Bajar el suelo a 4096 se probó y se revirtió:
+
+> el 2026-10-04 se bajó a 4096 (para "respetar" n_ctx_train) y **rompía
+> OpenWebUI/OpenInterpreter** → revertido a 8192 el mismo día. El comentario del
+> código, que antes decía "el modelo lo limita por sí mismo", era falso y se
+> corrigió.
+
+**VRAM medida** (RX480 8 GiB, OLMoE@8192 residente): `mem_info_vram_used`
+**5024 MiB / 8190 MiB** → ~3,1 GiB libres. KV de OLMoE ≈ 0,8 GiB a 8192
+(~98 KB/token). Techo práctico por VRAM:
+
+| ctx OLMoE | VRAM usada aprox | margen |
+|-----------|------------------|--------|
+| 8192      | ~5,0 GiB         | estado actual |
+| 16384     | ~6,0 GiB         | ~2 GiB libres |
+| 32768     | ~7,2 GiB         | fits justo, sin sitio para 2 modelos |
+
+**Recomendación:** para contexto largo real (OpenInterpreter/OpenWebUI mandan
+system prompt + esquemas de tools) usar **Qwen3-1.7B**, nativo 32768 y ya servido
+por la API :1235. OLMoE es un modelo de contexto corto por entrenamiento.
