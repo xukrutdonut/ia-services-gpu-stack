@@ -54,6 +54,46 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
+  # SearXNG - metabuscador (backend de busqueda para searxng-mcp y para el
+  # backend `searxng` de Hermes en config.yaml). Puerto host 8085 -> 8080.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # MCP server de busqueda web (tool `search_web`). Usa SearXNG interno y
+  # cae a DDGS si SearXNG no responde. Transporte SSE en /sse (patron
+  # consumido por LM Studio y por mcp-bridge/oi_mcp_proxy.py).
+  searxng-mcp:
+    build:
+      context: ./mcp-servers/searxng-mcp
+      dockerfile: Dockerfile
+    image: searxng-mcp:latest
+    container_name: searxng-mcp
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+    depends_on:
+      - searxng
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
   nano-fs-tools-mcp:
     build:
       context: ./mcp-servers/nano-fs-tools-mcp
@@ -64,7 +104,7 @@ services:
     ports:
       - "8096:8096"
     volumes:
-      - /home/arkantu/produccion:/workspace
+      - /home/arkantu/workspace:/workspace
     environment:
       - WORKSPACE_DIR=/workspace
       - OPENVINO_GENAI_URL=http://ia-gpu-intel-openvino:8000/v1
@@ -143,10 +183,20 @@ services:
       # renderD128/renderD129 entre arranques (visto tras actualizar a 7.0.0-38).
       # La selección real la hacen las env (ZE_AFFINITY_MASK / level_zero) y el
       # hardware no-Intel no se expone por Level-Zero, así que no hay ambigüedad.
-      - /dev/dri/card0:/dev/dri/card0
-      - /dev/dri/card1:/dev/dri/card1
-      - /dev/dri/renderD128:/dev/dri/renderD128
-      - /dev/dri/renderD129:/dev/dri/renderD129
+      # by-path: estable por PCI (la reenumeracion del kernel cambia cardN entre
+      # arranques; incluso hubo boots sin card0). Intel=00:02.0, AMD=01:00.0.
+      - source: /dev/dri/by-path/pci-0000:00:02.0-card
+        target: /dev/dri/card0
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:00:02.0-render
+        target: /dev/dri/renderD128
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:01:00.0-card
+        target: /dev/dri/card1
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:01:00.0-render
+        target: /dev/dri/renderD129
+        permissions: rwm
       - /dev/accel/accel0:/dev/accel/accel0
     group_add:
       - "44"
@@ -233,10 +283,19 @@ services:
       # card0/card1 y renderD128/renderD129 entre la RX480 y la Arc. El entrypoint
       # detecta la AMD por PCI vendor (0x1002) y Vulkan la fija con
       # MESA_VK_DEVICE_SELECT=1002:67df!, así que el nombre del nodo da igual.
-      - /dev/dri/card0:/dev/dri/card0
-      - /dev/dri/card1:/dev/dri/card1
-      - /dev/dri/renderD128:/dev/dri/renderD128
-      - /dev/dri/renderD129:/dev/dri/renderD129
+      # by-path: estable por PCI (ver comentario en ia-gpu-intel-openvino).
+      - source: /dev/dri/by-path/pci-0000:00:02.0-card
+        target: /dev/dri/card0
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:00:02.0-render
+        target: /dev/dri/renderD128
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:01:00.0-card
+        target: /dev/dri/card1
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:01:00.0-render
+        target: /dev/dri/renderD129
+        permissions: rwm
       - /dev/kfd:/dev/kfd
       - /dev/kmsg:/dev/kmsg
     environment:

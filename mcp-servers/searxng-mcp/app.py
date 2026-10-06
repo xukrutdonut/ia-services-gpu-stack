@@ -59,4 +59,9 @@ async def search_web(query: str, max_results: int = 5) -> str:
         return f"Error performing web search: {e}"
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8092)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8092)
+    parser.add_argument("--transport", type=str, default="sse", choices=["sse", "streamable-http"])
+    args = parser.parse_args()
+    mcp.run(transport=args.transport, host="0.0.0.0", port=args.port)
