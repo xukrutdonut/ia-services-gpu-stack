@@ -40,20 +40,26 @@ done
 # puede disparar PRT incluso con RADV_PERFTEST=no_sam. En su lugar, verificar
 # via sysfs que el dispositivo DRM existe y tiene VRAM.
 echo "[lms-amd-entrypoint] Verificando GPU AMD via sysfs..."
-if [ ! -e /dev/dri/renderD128 ] || [ ! -e /dev/dri/card1 ]; then
-    echo "[lms-amd-entrypoint] ❌ ERROR CRÍTICO: /dev/dri/renderD128 o card1 no existen."
+# NO hardcodear card0/card1 ni renderD128/renderD129: el kernel reenumera las
+# GPUs entre arranques (visto tras actualizar a 7.0.0-38: la RX480 pasó de
+# card1/renderD128 a card0/renderD129 y la Arc al revés). Se localiza la GPU
+# AMD por PCI vendor (0x1002) recorriendo /sys/class/drm.
+AMD_CARD=""
+for c in /sys/class/drm/card[0-9]*; do
+    [ -e "$c/device/vendor" ] || continue
+    v=$(cat "$c/device/vendor" 2>/dev/null)
+    if [ "$v" = "0x1002" ]; then
+        AMD_CARD=$(basename "$c")
+        break
+    fi
+done
+if [ -z "$AMD_CARD" ] || [ ! -e "/dev/dri/$AMD_CARD" ]; then
+    echo "[lms-amd-entrypoint] ❌ ERROR CRÍTICO: no hay GPU con vendor 0x1002 visible en /dev/dri."
     echo "[lms-amd-entrypoint] ❌ La GPU AMD no está disponible. Abortando."
     sleep 10
     exit 1
 fi
-# Verificar que card1 no es un dispositivo zombie (vendor 0x1002 = AMD)
-GPU_VENDOR=$(cat /sys/class/drm/card1/device/vendor 2>/dev/null || echo "")
-if [ "$GPU_VENDOR" != "0x1002" ]; then
-    echo "[lms-amd-entrypoint] ❌ ERROR: card1 vendor=$GPU_VENDOR (esperado 0x1002). GPU zombie?"
-    sleep 10
-    exit 1
-fi
-echo "[lms-amd-entrypoint] ✅ GPU AMD detectada via sysfs (vendor=0x1002)."
+echo "[lms-amd-entrypoint] ✅ GPU AMD detectada via sysfs: $AMD_CARD (vendor=0x1002)."
 
 # Borrar cache de indice de modelos stale.
 # LM Studio almacena en .internal/model-index-cache.json el indice de modelos

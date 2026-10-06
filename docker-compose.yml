@@ -139,7 +139,13 @@ services:
         soft: 65536
         hard: 65536
     devices:
+      # Se mapean AMBOS nodos DRM: el kernel reenumera card0/card1 y
+      # renderD128/renderD129 entre arranques (visto tras actualizar a 7.0.0-38).
+      # La selección real la hacen las env (ZE_AFFINITY_MASK / level_zero) y el
+      # hardware no-Intel no se expone por Level-Zero, así que no hay ambigüedad.
       - /dev/dri/card0:/dev/dri/card0
+      - /dev/dri/card1:/dev/dri/card1
+      - /dev/dri/renderD128:/dev/dri/renderD128
       - /dev/dri/renderD129:/dev/dri/renderD129
       - /dev/accel/accel0:/dev/accel/accel0
     group_add:
@@ -223,8 +229,14 @@ services:
     cap_add:
       - SYSLOG
     devices:
+      # Ambos nodos DRM: la reenumeracion del kernel (7.0.0-38) intercambió
+      # card0/card1 y renderD128/renderD129 entre la RX480 y la Arc. El entrypoint
+      # detecta la AMD por PCI vendor (0x1002) y Vulkan la fija con
+      # MESA_VK_DEVICE_SELECT=1002:67df!, así que el nombre del nodo da igual.
+      - /dev/dri/card0:/dev/dri/card0
       - /dev/dri/card1:/dev/dri/card1
       - /dev/dri/renderD128:/dev/dri/renderD128
+      - /dev/dri/renderD129:/dev/dri/renderD129
       - /dev/kfd:/dev/kfd
       - /dev/kmsg:/dev/kmsg
     environment:
