@@ -145,11 +145,35 @@ class McpClient:
 MCP = McpClient(MCP_URL)
 
 
+def mcp_ping(timeout=6):
+    """Sonda no bloqueante: si hay una generación en curso el lock está tomado."""
+    if not MCP._lock.acquire(timeout=0.5):
+        return False, "MCP ocupado (generación en curso)"
+    try:
+        MCP.call("moodle_list_courses", {}, timeout=timeout)
+        return True, None
+    except Exception as e:
+        return False, str(e)[:200]
+    finally:
+        MCP._lock.release()
+
+
 # --------------------------------------------------------------------------
 # Motor de ejecución
 # --------------------------------------------------------------------------
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+
+# jobs con un hilo realmente vivo en este proceso; un job en estado "running"
+# que no está aquí es un huérfano de un reinicio y se puede reanudar.
+LIVE = set()
+LIVE_LOCK = threading.Lock()
+AUTO_RESUME = str(os.environ.get("AUTO_RESUME", "1")).lower() not in ("0", "false", "no", "off")
+
+
+def is_live(job_id):
+    with LIVE_LOCK:
+        return job_id in LIVE
 
 
 def _job_path(job_id):
@@ -202,7 +226,26 @@ def _moodle_link(modname, cmid):
     return f"{MOODLE_URL}/mod/{modname}/view.php?id={cmid}" if cmid else None
 
 
+def pending_keys(job):
+    """Pasos del plan que no constan como completados."""
+    done = {s.get("key") for s in job.get("steps", []) if s.get("status") == "ok"}
+    return [s.get("key") for s in job.get("plan", []) if s.get("key") not in done]
+
+
 def run_plan(job, only_keys=None):
+    jid = job["id"]
+    with LIVE_LOCK:
+        if jid in LIVE:
+            return  # ya hay un hilo trabajando en este job
+        LIVE.add(jid)
+    try:
+        _run_plan(job, only_keys)
+    finally:
+        with LIVE_LOCK:
+            LIVE.discard(jid)
+
+
+def _run_plan(job, only_keys=None):
     job["status"] = "running"
     job["started"] = time.time()
     log(job, f"Plan iniciado · modelo={job['options'].get('model_target')} · "
@@ -262,6 +305,10 @@ def run_plan(job, only_keys=None):
 
                 elif kind == "page":
                     key = f"s{step['section_num']}_page"
+                    if (results.get(key) or {}).get("published"):
+                        step_end(job, st["key"], "ok", "ya publicada antes del reinicio")
+                        log(job, f"Sección {step['section_num']}: lección ya publicada, no se republica")
+                        continue
                     gen = MCP.call("moodle_generate_and_add_page", {
                         "course_id": course_id,
                         "section_num": int(step["section_num"]),
@@ -300,6 +347,10 @@ def run_plan(job, only_keys=None):
 
                 elif kind == "quiz":
                     key = f"s{step['section_num']}_quiz"
+                    if (results.get(key) or {}).get("published"):
+                        step_end(job, st["key"], "ok", "ya importado antes del reinicio")
+                        log(job, f"Sección {step['section_num']}: quiz ya importado, no se duplica")
+                        continue
                     n = int(step.get("num_questions", 5))
                     gen = MCP.call("moodle_generate_and_import_quiz", {
                         "course_id": course_id,
@@ -421,20 +472,65 @@ def start_job(payload):
     return job
 
 
-def retry_job(job, keys):
-    """Relanza solo los pasos indicados, conservando resultados ya aplicados."""
+def retry_job(job, keys=None):
+    """Relanza los pasos indicados (o los pendientes), conservando lo ya aplicado."""
     plan_keys = [s.get("key") for s in job.get("plan", [])]
     todo = [k for k in (keys or []) if k in plan_keys]
+    if not todo:
+        todo = pending_keys(job)
     if not todo:
         return None
     job["steps"] = [s for s in job.get("steps", []) if s.get("key") not in todo]
     job["cancel"] = False
     job["status"] = "queued"
     job["finished"] = None
-    log(job, "Reintento selectivo: " + ", ".join(todo))
+    log(job, "Reanudando desde el último paso completado · pendientes: " + ", ".join(todo))
     save_job(job)
     threading.Thread(target=run_plan, args=(job, todo), daemon=True).start()
     return todo
+
+
+def recover_jobs():
+    """Rehidrata los jobs del disco y reanuda los que quedaron a medias."""
+    resumed = []
+    for job in load_jobs():
+        jid = job.get("id")
+        if not jid:
+            continue
+        with JOBS_LOCK:
+            JOBS[jid] = job
+        if job.get("status") not in ("running", "queued") or is_live(jid):
+            continue
+        fixed = 0
+        for s in job.get("steps", []):
+            if s.get("status") != "running":
+                continue
+            s["ended"] = s.get("ended") or time.time()
+            if ((job.get("results") or {}).get(s.get("key")) or {}).get("published"):
+                s["status"] = "ok"
+                s["summary"] = s.get("summary") or "publicado antes del reinicio"
+            else:
+                s["status"] = "interrupted"
+                s["error"] = "interrumpido por el reinicio del servicio"
+            fixed += 1
+        job["status"] = "interrupted"
+        job["finished"] = None
+        log(job, f"Reinicio del servicio detectado: {fixed} paso(s) sin terminar", "warn")
+        save_job(job)
+        pending = pending_keys(job)
+        if not pending:
+            job["status"] = "done"
+            job["finished"] = time.time()
+            save_job(job)
+            continue
+        if AUTO_RESUME:
+            log(job, f"Reanudación automática de {len(pending)} paso(s)", "warn")
+            retry_job(job, pending)
+            resumed.append(jid)
+        else:
+            log(job, "AUTO_RESUME desactivado: reanuda a mano desde la pestaña de revisión", "warn")
+            save_job(job)
+    return resumed
 
 
 def job_summary(job):
@@ -442,6 +538,8 @@ def job_summary(job):
         "id": job["id"],
         "created": job.get("created"),
         "status": job.get("status"),
+        "live": is_live(job["id"]),
+        "pending": len(pending_keys(job)),
         "course_id": job.get("course_id"),
         "steps_total": len(job.get("plan", [])),
         "steps_ok": sum(1 for s in job.get("steps", []) if s["status"] == "ok"),
@@ -498,7 +596,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode())
@@ -529,13 +630,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?")[0]
         if p == "/api/health":
-            try:
-                MCP.call("moodle_list_courses", {}, timeout=30)
-                mcp_ok, err = True, None
-            except Exception as e:
-                mcp_ok, err = False, str(e)[:200]
+            # Sonda rápida: nunca se bloquea detrás de una generación en curso.
+            deep = "deep=1" in self.path
+            if MCP._lock.acquire(timeout=0.25):
+                MCP._lock.release()
+                mcp_ok, err = mcp_ping(20 if deep else 5)
+            else:
+                mcp_ok, err = True, "generación en curso (sonda omitida)"
+            with LIVE_LOCK:
+                live = sorted(LIVE)
             self._json(200, {"ok": True, "mcp": mcp_ok, "mcp_url": MCP_URL, "error": err,
-                             "moodle_url": MOODLE_URL})
+                             "moodle_url": MOODLE_URL, "live_jobs": live})
         elif p == "/api/jobs":
             jobs = load_jobs()
             self._json(200, {"ok": True, "jobs": [job_summary(j) for j in jobs[:40]]})
@@ -596,15 +701,13 @@ class Handler(BaseHTTPRequestHandler):
             if not job:
                 self._json(404, {"ok": False, "error": "job no encontrado"})
                 return
-            if job.get("status") == "running":
+            if is_live(jid):
                 self._json(409, {"ok": False, "error": "la ejecución sigue en curso"})
                 return
             keys = body.get("keys") or []
-            if not keys:
-                keys = [s["key"] for s in job.get("steps", []) if s.get("status") == "error"]
             done = retry_job(job, keys)
             if not done:
-                self._json(400, {"ok": False, "error": "no hay pasos que reintentar"})
+                self._json(400, {"ok": False, "error": "no hay pasos pendientes que ejecutar"})
                 return
             self._json(200, {"ok": True, "keys": done, "job": job_summary(job)})
         elif re.fullmatch(r"/api/jobs/[A-Za-z0-9\-]+/cancel", p):
@@ -624,6 +727,12 @@ def main():
     port = int(os.environ.get("PORT", "8098"))
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[studio] escuchando en :{port} · MCP={MCP_URL} · datos={DATA_DIR}", flush=True)
+    try:
+        resumed = recover_jobs()
+        if resumed:
+            print(f"[studio] reanudados {len(resumed)} job(s): {', '.join(resumed)}", flush=True)
+    except Exception as e:
+        print(f"[studio] recovery falló: {e}", flush=True)
     srv.serve_forever()
 
 

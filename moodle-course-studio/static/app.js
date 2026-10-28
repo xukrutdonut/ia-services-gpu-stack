@@ -114,8 +114,12 @@ async function health() {
   const el = $('#health');
   el.innerHTML = '<span class="dot wait"></span><span>Comprobando MCP…</span>';
   const j = await api('/api/health');
+  const busy = (j.live_jobs || []).length;
   if (j.ok && j.mcp) {
-    el.innerHTML = '<span class="dot ok"></span><span>moodle-ia-mcp conectado</span>';
+    el.innerHTML = busy
+      ? '<span class="dot ok"></span><span>generando · MCP activo</span>'
+      : '<span class="dot ok"></span><span>moodle-ia-mcp conectado</span>';
+    el.title = j.error || '';
   } else {
     el.innerHTML = '<span class="dot err"></span><span>MCP sin respuesta</span>';
     el.title = j.error || '';
@@ -498,9 +502,10 @@ function renderJob() {
   const j = S.job;
   if (!j) return;
   const total = (j.plan || []).length || 1;
-  const done = (j.steps || []).filter((s) => ['ok', 'error'].includes(s.status)).length;
+  const done = (j.steps || []).filter((s) => ['ok', 'error', 'interrupted'].includes(s.status)).length;
   $('#barFill').style.width = Math.round((done / total) * 100) + '%';
-  const names = { queued: 'en cola', running: 'en ejecución', done: 'completado', error: 'error', cancelled: 'cancelado' };
+  const names = { queued: 'en cola', running: 'en ejecución', done: 'completado', error: 'error',
+                  interrupted: 'interrumpido · se puede reanudar', cancelled: 'cancelado' };
   $('#jobState').textContent = (j.id || '') + ' · ' + (names[j.status] || j.status);
   $('#steps').innerHTML = (j.steps || []).map((s) => `
     <div class="step ${s.status}">
@@ -661,12 +666,13 @@ $('#btnPublishAll').addEventListener('click', async () => {
 
 $('#btnRetryFailed').addEventListener('click', async () => {
   if (!S.job) { toast('No hay ejecución abierta', 'err'); return; }
-  const failed = (S.job.steps || []).filter((s) => s.status === 'error').map((s) => s.key);
-  if (!failed.length) { toast('No hay pasos fallidos en esta ejecución'); return; }
-  if (!confirm(`¿Reintentar ${failed.length} paso(s) fallido(s): ${failed.join(', ')}?`)) return;
-  const r = await api('/api/jobs/' + S.job.id + '/retry', { keys: failed }, 90000);
-  if (!r.ok) { toast(r.error || 'no se pudo reintentar', 'err'); return; }
-  toast('Reintentando: ' + failed.join(', '), 'ok');
+  const doneKeys = new Set((S.job.steps || []).filter((s) => s.status === 'ok').map((s) => s.key));
+  const pend = (S.job.plan || []).map((p) => p.key).filter((k) => !doneKeys.has(k));
+  if (!pend.length) { toast('La ejecución ya tiene todos los pasos completados'); return; }
+  if (!confirm(`¿Reanudar ${pend.length} paso(s) pendiente(s) desde el último completado?\n\n${pend.join(', ')}`)) return;
+  const r = await api('/api/jobs/' + S.job.id + '/retry', { keys: pend }, 90000);
+  if (!r.ok) { toast(r.error || 'no se pudo reanudar', 'err'); return; }
+  toast('Reanudando: ' + pend.join(', '), 'ok');
   pollJob();
 });
 

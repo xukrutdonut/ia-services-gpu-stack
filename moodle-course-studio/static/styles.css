@@ -220,6 +220,8 @@ button.danger { border-color: var(--err); color: var(--err); }
 .hrow .st { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; }
 .hrow .st.done { color: var(--ok); } .hrow .st.error { color: var(--err); }
 .hrow .st.running, .hrow .st.queued { color: var(--warn); } .hrow .st.cancelled { color: var(--muted); }
+.hrow .st.interrupted { color: var(--warn); }
+.step.interrupted .badge { color: var(--warn); }
 
 /* ---------- toast ---------- */
 .toast {
