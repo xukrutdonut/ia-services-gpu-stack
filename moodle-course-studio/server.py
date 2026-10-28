@@ -533,6 +533,69 @@ def recover_jobs():
     return resumed
 
 
+KIND_LABEL = {"create_course": "curso", "section": "sección", "page": "lección", "quiz": "cuestionario"}
+
+
+def current_step(job):
+    """Último paso marcado como running; es el que está consumiendo el LLM."""
+    for s in reversed(job.get("steps") or []):
+        if s.get("status") == "running":
+            return s
+    return None
+
+
+def activity_snapshot():
+    """Generaciones en curso ahora mismo, se hayan lanzado desde la UI o por API."""
+    with JOBS_LOCK:
+        jobs = list(JOBS.values())
+    known = {j.get("id") for j in jobs}
+    for job in load_jobs():
+        if job.get("id") not in known:
+            jobs.append(job)
+    out = []
+    now = time.time()
+    for job in jobs:
+        jid = job.get("id")
+        if not jid:
+            continue
+        st = job.get("status")
+        live = is_live(jid)
+        if not live and st not in ("running", "queued", "interrupted"):
+            continue
+        cur = current_step(job) or {}
+        plan = job.get("plan") or []
+        plan_by_key = {p.get("key"): p for p in plan}
+        meta = plan_by_key.get(cur.get("key")) or {}
+        opts = job.get("options") or {}
+        kind = KIND_LABEL.get(meta.get("kind") or "", meta.get("kind") or "")
+        sec = meta.get("section_num")
+        step_label = (f"sección {sec} · {kind}" if sec else kind).strip(" ·")
+        entries = job.get("log") or []
+        last = next((e for e in reversed(entries) if e.get("level") in ("ok", "warn", "error")),
+                    entries[-1] if entries else {})
+        out.append({
+            "id": jid,
+            "live": live,
+            "status": "running" if live else st,
+            "cancel": bool(job.get("cancel")),
+            "title": opts.get("title") or f"curso #{job.get('course_id') or '—'}",
+            "course_id": job.get("course_id"),
+            "model": opts.get("model_target"),
+            "step": cur.get("key"),
+            "step_label": step_label,
+            "steps_ok": sum(1 for s in job.get("steps") or [] if s.get("status") == "ok"),
+            "steps_total": len(plan),
+            "pending": len(pending_keys(job)) if plan else 0,
+            "elapsed": round(now - (job.get("started") or job.get("created") or now), 1),
+            "age": round(now - (job.get("created") or now), 1),
+            "step_elapsed": round(now - cur["started"], 1) if cur.get("started") else None,
+            "last_msg": (last.get("msg") or "")[:180],
+            "last_t": last.get("t"),
+        })
+    out.sort(key=lambda x: (0 if x["live"] else 1, -x["elapsed"]))
+    return out
+
+
 def job_summary(job):
     return {
         "id": job["id"],
@@ -641,6 +704,15 @@ class Handler(BaseHTTPRequestHandler):
                 live = sorted(LIVE)
             self._json(200, {"ok": True, "mcp": mcp_ok, "mcp_url": MCP_URL, "error": err,
                              "moodle_url": MOODLE_URL, "live_jobs": live})
+        elif p == "/api/activity":
+            # Monitor de generación activa: incluye jobs lanzados por API.
+            err = None
+            try:
+                jobs = activity_snapshot()
+            except Exception as e:
+                jobs, err = [], str(e)[:200]
+            self._json(200, {"ok": True, "jobs": jobs, "error": err,
+                             "polled": round(time.time(), 1)})
         elif p == "/api/jobs":
             jobs = load_jobs()
             self._json(200, {"ok": True, "jobs": [job_summary(j) for j in jobs[:40]]})

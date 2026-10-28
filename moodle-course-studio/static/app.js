@@ -707,6 +707,104 @@ async function loadHistory() {
 $('#btnHistRefresh').addEventListener('click', loadHistory);
 
 // ---------------------------------------------------------------------------
+// Monitor global de generación activa (incluye jobs lanzados por API)
+// ---------------------------------------------------------------------------
+let activityTimer = null;
+
+function fmtClock(s) {
+  s = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${p(m)}:${p(sec)}` : `${m}:${p(sec)}`;
+}
+
+async function activity() {
+  clearTimeout(activityTimer);
+  const r = await api('/api/activity');
+  renderActivity(r && r.ok ? (r.jobs || []) : null);
+  activityTimer = setTimeout(activity, 4000);
+}
+
+function renderActivity(jobs) {
+  const bar = $('#liveBar');
+  if (!bar) return;
+  if (jobs === null) { bar.hidden = true; return; }
+  if (!jobs.length) {
+    bar.hidden = true; bar.innerHTML = '';
+    if (!S.job) $('#jobState').textContent = 'sin ejecución';
+    return;
+  }
+  const live = jobs.filter((j) => j.live);
+  bar.hidden = false;
+  bar.classList.toggle('paused', !live.length);
+  const head = live.length
+    ? `<span class="dot ok"></span> Generación en curso · ${live.length === 1 ? '1 trabajo' : live.length + ' trabajos'}`
+    : `<span class="dot wait"></span> Generación en pausa · se puede reanudar`;
+  bar.innerHTML = `<div class="livehead">${head}</div>` + jobs.map((j) => {
+    const pct = j.steps_total ? Math.min(100, Math.round((j.steps_ok / j.steps_total) * 100)) : 0;
+    const mine = j.id === S.jobId;
+    const chip = j.cancel ? '<span class="chip err">cancelando</span>'
+      : j.live ? '<span class="chip on">generando</span>'
+      : '<span class="chip off">en pausa</span>';
+    const where = j.step_label ? (j.step_label + (j.step ? ' · ' + j.step : '')) : 'preparando el plan';
+    const bits = [
+      where,
+      `${j.steps_ok}/${j.steps_total} pasos`,
+      `${j.pending} pendiente(s)`,
+      j.step_elapsed != null ? 'paso ' + fmtClock(j.step_elapsed) : '',
+      'total ' + fmtClock(j.age),
+      j.model ? 'modelo ' + j.model : '',
+      mine ? 'esta pestaña' : 'externa (API)',
+    ].filter(Boolean);
+    const acts = [
+      `<button class="secondary small" data-act="view" data-id="${esc(j.id)}">Ver</button>`,
+      j.live && !j.cancel ? `<button class="ghost small" data-act="cancel" data-id="${esc(j.id)}">Cancelar</button>` : '',
+      !j.live && j.pending ? `<button class="secondary small" data-act="resume" data-id="${esc(j.id)}">Reanudar</button>` : '',
+    ].join('');
+    return `
+      <div class="livejob">
+        <div>
+          <div class="t">${esc(j.title)} ${chip}</div>
+          <div class="meta">${esc(j.id)} · ${esc(bits.join(' · '))}</div>
+          ${j.last_msg ? `<div class="meta">${esc(j.last_msg)}</div>` : ''}
+          <div class="mini"><i style="width:${pct}%"></i></div>
+        </div>
+        <div class="acts">${acts}</div>
+      </div>`;
+  }).join('');
+  if (!S.job && live.length) {
+    $('#jobState').textContent = 'generación activa fuera de esta pestaña · ' + live[0].id;
+  }
+}
+
+$('#liveBar').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  const id = b.dataset.id;
+  if (b.dataset.act === 'view') {
+    S.jobId = id; persist();
+    const r = await api('/api/jobs/' + id);
+    if (r.ok) {
+      S.job = r.job;
+      if (S.job.course_id) S.course.id = S.job.course_id;
+      renderJob(); renderChips();
+    }
+    switchTab('run');
+    pollJob();
+  } else if (b.dataset.act === 'cancel') {
+    b.disabled = true;
+    const r = await api('/api/jobs/' + id + '/cancel', {});
+    toast(r.ok ? 'Cancelación solicitada' : (r.error || 'no se pudo cancelar'), r.ok ? '' : 'err');
+    activity();
+  } else if (b.dataset.act === 'resume') {
+    b.disabled = true; b.textContent = 'reanudando…';
+    const r = await api('/api/jobs/' + id + '/retry', {}, 90000);
+    toast(r.ok ? 'Reanudando ' + (r.keys || []).length + ' paso(s)' : (r.error || 'no se pudo reanudar'), r.ok ? 'ok' : 'err');
+    activity();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Global
 // ---------------------------------------------------------------------------
 $('#themeBtn').addEventListener('click', () => {
@@ -743,5 +841,6 @@ $('#resetBtn').addEventListener('click', () => {
   $$('input[name="pubmode"]').forEach((r) => { r.checked = (r.value === 'auto') === !!S.run.publish; });
   renderModules(); renderCourseMap(); renderChips(); renderPlan();
   health(); loadCategories(); loadCourses();
+  activity();
   if (S.jobId) pollJob();
 })();

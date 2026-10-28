@@ -231,3 +231,27 @@ button.danger { border-color: var(--err); color: var(--err); }
 }
 .toast.err { border-left-color: var(--err); }
 .toast.ok { border-left-color: var(--ok); }
+
+/* ---------- monitor de generación activa ---------- */
+.livebar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; flex-direction: column; gap: 7px;
+  background: var(--card); border: 1px solid var(--warn); border-left-width: 3px;
+  border-radius: var(--radius); padding: 9px 12px; margin: 0 0 14px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.18);
+}
+.livebar.paused { border-color: var(--line); border-left-color: var(--muted); }
+.livehead { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--warn); }
+.livebar.paused .livehead { color: var(--muted); }
+.livehead .dot { animation: pulse 1.3s infinite; }
+.livejob { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+  padding-top: 7px; border-top: 1px dashed var(--line); }
+.livejob:first-of-type { border-top: 0; padding-top: 0; }
+.livejob .t { font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.livejob .t .chip { font-weight: 500; }
+.livejob .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.livejob .mini { height: 4px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+.livejob .mini > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent2), var(--ok)); transition: width .5s; }
+.livejob .acts { display: flex; gap: 6px; }
+.livebar .idle-note { font-size: 11.5px; color: var(--muted); }
