@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moodle Course Studio</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">MS</div>
+      <div>
+        <strong>Moodle Course Studio</strong>
+        <small>moodle-ia-mcp · IA local</small>
+      </div>
+    </div>
+
+    <div id="health" class="health"><span class="dot wait"></span><span>Comprobando MCP…</span></div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-tab="course"><i>1</i> Curso y destino</button>
+      <button class="nav-item" data-tab="syllabus"><i>2</i> Temario</button>
+      <button class="nav-item" data-tab="run"><i>3</i> Generación</button>
+      <button class="nav-item" data-tab="review"><i>4</i> Revisión y publicación</button>
+      <button class="nav-item" data-tab="history"><i>5</i> Historial</button>
+    </nav>
+
+    <div class="side-foot">
+      <button id="themeBtn" class="ghost">Tema claro</button>
+      <button id="resetBtn" class="ghost danger">Reiniciar formulario</button>
+      <p class="tiny">Modelo local servido por LM Studio / llama.cpp. Todo el contenido se genera en tu red.</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="viewTitle">Curso y destino</h1>
+        <p id="viewSub" class="sub">Elige si crear un curso nuevo o trabajar sobre uno existente.</p>
+      </div>
+      <div class="chips">
+        <span id="chipCourse" class="chip off">sin curso</span>
+        <span id="chipModel" class="chip">modelo: intel</span>
+        <span id="chipDraft" class="chip off">0 borradores</span>
+      </div>
+    </header>
+
+    <!-- ============ 1. CURSO ============ -->
+    <section class="tab active" id="tab-course">
+      <div class="segmented" id="courseMode">
+        <button class="seg active" data-mode="new">Curso nuevo</button>
+        <button class="seg" data-mode="existing">Curso existente</button>
+      </div>
+
+      <div class="grid2">
+        <div class="card" id="paneNew">
+          <h2>Datos del curso</h2>
+          <label>Nombre completo
+            <input id="cFullname" placeholder="Neuropediatría para residentes · Curso 7">
+          </label>
+          <label>Nombre corto (shortname)
+            <input id="cShortname" placeholder="NPR-RES-07" maxlength="40">
+          </label>
+          <label>Categoría destino
+            <select id="cCategory"><option value="">— cargando —</option></select>
+            <input id="cCategoryId" type="number" min="1" value="1" hidden>
+          </label>
+          <div class="row">
+            <label>Formato
+              <select id="cFormat">
+                <option value="topics">Temas</option>
+                <option value="weeks">Semanas</option>
+              </select>
+            </label>
+          </div>
+          <label>Resumen (HTML permitido)
+            <textarea id="cSummary" rows="4" placeholder="Curso de actualización clínica en neuropediatría…"></textarea>
+          </label>
+          <p class="note">El curso se crea con el primer paso del plan. Los módulos se añaden en secciones 1..N.</p>
+        </div>
+
+        <div class="card" id="paneExisting" hidden>
+          <h2>Curso existente</h2>
+          <label>Curso
+            <select id="cCourseSelect"><option value="">— cargando —</option></select>
+          </label>
+          <button id="btnLoadStructure" class="secondary">Cargar estructura</button>
+          <div id="structureOut" class="structure"></div>
+          <p class="note">Puedes añadir nuevas secciones a un curso existente; el plan escribirá a partir de la sección indicada.</p>
+        </div>
+
+        <div class="card" id="paneMap">
+          <h2>Mapa de módulos</h2>
+          <p class="note">Cada módulo ocupa una sección del curso, en orden: lección → cuestionario.</p>
+          <div id="courseMap" class="map"></div>
+        </div>
+      </div>
+
+      <div class="actions"><button class="primary" data-goto="syllabus">Continuar → Temario</button></div>
+    </section>
+
+    <!-- ============ 2. TEMARIO ============ -->
+    <section class="tab" id="tab-syllabus">
+      <div class="grid2 wide-left">
+        <div class="card">
+          <h2>Generar temario con IA local</h2>
+          <label>Tema general del curso
+            <textarea id="sTopic" rows="2" placeholder="Neurología pediátrica: epilepsia, trastornos del movimiento y neurodesarrollo"></textarea>
+          </label>
+          <div class="row">
+            <label>Público objetivo
+              <input id="sAudience" value="Residentes de pediatría y neuropediatría">
+            </label>
+            <label>Nº de módulos
+              <input id="sModules" type="number" min="1" max="20" value="5">
+            </label>
+          </div>
+          <label>Resultados de aprendizaje (opcional)
+            <textarea id="sOutcomes" rows="2" placeholder="Diagnóstico diferencial, manejo inicial, criterios de derivación"></textarea>
+          </label>
+          <div class="row">
+            <label>Preguntas por módulo
+              <input id="sQpm" type="number" min="1" max="20" value="5">
+            </label>
+            <label>Modelo
+              <select id="sModel">
+                <option value="intel">intel (Qwen3-30B · iGPU Arc)</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+          </div>
+          <div class="row-actions">
+            <button id="btnSyllabus" class="primary">Generar temario</button>
+            <span id="sylState" class="state"></span>
+          </div>
+          <pre id="sylRaw" class="raw" hidden></pre>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Módulos</h2>
+            <div class="row-actions">
+              <button id="btnAddModule" class="secondary small">+ Añadir módulo</button>
+              <button id="btnImportSyllabus" class="secondary small">Importar JSON</button>
+            </div>
+          </div>
+          <div id="modules" class="modules"></div>
+          <p class="note">Un módulo = una sección: título de sección, una lección (página) y un cuestionario con su banco de preguntas propio.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="link" data-goto="course">← Curso</button>
+        <button class="primary" data-goto="run">Continuar → Generación</button>
+      </div>
+    </section>
+
+    <!-- ============ 3. GENERACIÓN ============ -->
+    <section class="tab" id="tab-run">
+      <div class="grid2 wide-left">
+        <div class="card">
+          <h2>Parámetros de ejecución</h2>
+          <div class="row">
+            <label>Modelo
+              <select id="rModel">
+                <option value="intel">intel (Qwen3-30B · Arc)</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label>Temperatura
+              <input id="rTemp" type="number" step="0.1" min="0" max="1.2" value="0.3">
+            </label>
+          </div>
+          <label>Máx. tokens por lección
+            <input id="rMaxTokens" type="number" min="800" max="8000" step="200" value="3800">
+          </label>
+          <label class="radio-line">
+            <input type="radio" name="pubmode" value="auto" checked>
+            <span><strong>Automático</strong> — genera y publica lección + quiz en Moodle</span>
+          </label>
+          <label class="radio-line">
+            <input type="radio" name="pubmode" value="review">
+            <span><strong>Revisar antes de publicar</strong> — genera borradores y los publicas desde la pestaña Revisión</span>
+          </label>
+          <div class="row-actions">
+            <button id="btnRun" class="primary">Ejecutar plan</button>
+            <button id="btnCancel" class="secondary" disabled>Cancelar</button>
+          </div>
+          <p class="note warn">Una lección tarda ~30 s y un quiz ~60-90 s en la iGPU. El plan puede dejar el navegador cerrado: el estado se guarda en disco.</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Plan a ejecutar</h2><span id="planCount" class="state"></span></div>
+          <ol id="planList" class="plan"></ol>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Progreso</h2>
+          <span id="jobState" class="state">sin ejecución</span>
+        </div>
+        <div class="bar"><div id="barFill"></div></div>
+        <div id="steps" class="steps"></div>
+        <pre id="log" class="log"></pre>
+      </div>
+    </section>
+
+    <!-- ============ 4. REVISIÓN ============ -->
+    <section class="tab" id="tab-review">
+      <div class="card">
+        <div class="card-head">
+          <h2>Borradores generados</h2>
+          <div class="row-actions">
+            <button id="btnPublishAll" class="primary small">Publicar todo</button>
+            <button id="btnRetryFailed" class="secondary small">Reintentar fallidos</button>
+            <button id="btnRefreshJob" class="secondary small">Refrescar</button>
+          </div>
+        </div>
+        <p class="note">Revisa o edita el HTML/XML antes de enviarlo a Moodle. Publicar escribe en el curso real.</p>
+        <div id="reviewItems" class="review"></div>
+      </div>
+    </section>
+
+    <!-- ============ 5. HISTORIAL ============ -->
+    <section class="tab" id="tab-history">
+      <div class="card">
+        <div class="card-head"><h2>Ejecuciones</h2><button id="btnHistRefresh" class="secondary small">Refrescar</button></div>
+        <div id="history" class="history"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
