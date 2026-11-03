@@ -15,6 +15,7 @@ Docker Swarm stack para servicios de IA en homelab con GPUs Intel Arc (Xe2 128EU
 | **nano-fs-tools-mcp** | 8096 | MCP server: filesystem + delegación IA a GPUs |
 | **zotero-mcp** | 8765 | MCP server: Zotero local |
 | **moodle-ia-mcp** | 8097 | MCP server: Moodle + IA |
+| **docker-agent** | — | CLI (profile `agent`): runner cagent con planificador/ejecutor. `docker compose run --rm docker-agent "pregunta"`. Código en `~/workspace/docker-agent` |
 
 ## Arquitectura GPU Dual
 

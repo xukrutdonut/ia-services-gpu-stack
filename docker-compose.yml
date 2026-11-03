@@ -7,9 +7,6 @@ volumes:
   lms-config: null
   open-webui-data: null
   open-terminal-data: null
-  lms_amd_profile:
-    external: true
-    name: lms_amd_profile
 services:
   # ==========================================
   # SECCIÓN MCP (Model Context Protocol Servers)
@@ -109,30 +106,12 @@ services:
       - WORKSPACE_DIR=/workspace
       - OPENVINO_GENAI_URL=http://ia-gpu-intel-openvino:8000/v1
       - INTEL_OPENVINO_URL=http://ia-gpu-intel-openvino:8000/v1
-      - AMD_NODE_URL=http://ia-gpu-amd-rx480:1234/v1
     networks:
       - ia-routing-stack
     deploy:
       placement:
         constraints:
         - node.hostname == khazad-dum
-
-  zotero-mcp:
-    build:
-      context: ./mcp-servers/zotero-mcp
-      dockerfile: Dockerfile
-    image: zotero-mcp:latest
-    container_name: zotero-mcp
-    restart: unless-stopped
-    # network_mode: host is required because Zotero's local API (port 23119)
-    # listens on 127.0.0.1 only, and pyzotero hardcodes localhost:23119.
-    # open-webui reaches this server via http://172.18.0.1:8765/mcp (docker bridge gateway).
-    network_mode: host
-    volumes:
-      - /home/arkantu/Zotero:/root/Zotero:ro
-      - /home/arkantu/.config/zotero-mcp:/root/.config/zotero-mcp
-    environment:
-      - ZOTERO_LOCAL=true
 
   moodle-ia-mcp:
     build:
@@ -148,13 +127,87 @@ services:
       - MOODLE_TOKEN=${MOODLE_TOKEN:?define MOODLE_TOKEN en .env}
       - INTEL_OPENVINO_URL=http://ia-gpu-intel-openvino:8000/v1
       - INTEL_FALLBACK_URL=http://192.168.0.100:8006/v1
-      - AMD_NODE_URL=http://192.168.0.80:1234/v1
+      - DEFAULT_MODEL_INTEL=Qwen3-30B-A3B-Instruct-2507-int4-ov
+      - LLM_TIMEOUT=900
     networks:
       - ia-routing-stack
     deploy:
       placement:
         constraints:
         - node.hostname == khazad-dum
+
+  # Moodle Course Studio - frontend de configuracion y ejecucion del pipeline
+  # de creacion de cursos (moodle-ia-mcp + IA local). UI en :8098.
+  moodle-course-studio:
+    build:
+      context: ./moodle-course-studio
+      dockerfile: Dockerfile
+    image: moodle-course-studio:latest
+    container_name: moodle-course-studio
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+    environment:
+      - MCP_URL=http://moodle-ia-mcp:8097/mcp
+      - MOODLE_PUBLIC_URL=https://moodle.neuropedialab.org
+      - CALL_TIMEOUT=1800
+    volumes:
+      - ./moodle-course-studio/data:/data/jobs
+    depends_on:
+      - moodle-ia-mcp
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  # ==========================================
+  # DOCKER-AGENT (runner de agentes cagent + MCPs locales)
+  # CLI, no servicio: `profiles: ["agent"]` evita que arranque con `up -d`.
+  #   docker compose run --rm docker-agent "pregunta"
+  #   docker compose run --rm docker-agent            # TUI
+  # Wrapper: ~/.local/bin/docker-agent (envuelve el `run` de arriba).
+  # network_mode: host es requisito, no comodidad: la API local de Zotero
+  # escucha solo en 127.0.0.1:23119 y los modelos (OVMS :8006, embeddings :8012,
+  # LM Studio :1234) tambien estan en loopback del host.
+  # Perfiles: /configs/*.yaml (zotero.yaml activo; template.yaml para uno nuevo).
+  # ==========================================
+  docker-agent:
+    profiles: ["agent"]
+    build:
+      context: /home/arkantu/workspace/docker-agent
+      args:
+        CAGENT_VERSION: ${CAGENT_VERSION:-latest}
+        ZOTERO_MCP_VERSION: ${ZOTERO_MCP_VERSION:-0.15.1}
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    image: docker-agent:local
+    container_name: docker-agent
+    network_mode: host
+    working_dir: /work
+    environment:
+      - TZ=Europe/Madrid
+      - AGENT_CONFIG=${AGENT_CONFIG:-/configs/zotero.yaml}
+      - ZOTERO_LOCAL=true
+      # Sin esto FastMCP pinta su banner ASCII en stdout y rompe el stdio JSON-RPC
+      # del MCP de Zotero: el agente se queda colgado sin error.
+      - FASTMCP_SHOW_SERVER_BANNER=false
+      - FASTMCP_CHECK_FOR_UPDATES=off
+      # La superficie completa del MCP son ~23k tokens por peticion.
+      - ZOTERO_MCP_TOOLSETS=${ZOTERO_MCP_TOOLSETS:-semantic}
+    volumes:
+      - /home/arkantu/workspace/docker-agent/configs:/configs:ro
+      # config + indice semantico del MCP de Zotero (rw: el MCP escribe su cache)
+      - /home/arkantu/.config/zotero-mcp:/home/agent/.config/zotero-mcp
+      # biblioteca de Zotero en solo lectura (adjuntos y texto completo)
+      - /home/arkantu/Zotero:/home/agent/Zotero:ro
+      # historial de sesiones de cagent (para depurar turnos y tool calls)
+      - /home/arkantu/.local/share/docker-agent/cagent:/home/agent/.cagent
+      # salida: informes y ficheros que genere el agente
+      - /home/arkantu/workspace/docker-agent/out:/work
+    stdin_open: true
+    tty: true
 
   # ==========================================
   # IA-GPU-INTEL-OPENVINO (OpenVINO GenAI)
@@ -167,7 +220,9 @@ services:
     image: openvino/model_server:latest-gpu
     container_name: ia-gpu-intel-openvino
     restart: unless-stopped
-    shm_size: "64gb"
+    shm_size: "8gb"
+    mem_limit: 44g
+    memswap_limit: 44g
     ports:
       - "8006:8000"
     ipc: host
@@ -179,23 +234,15 @@ services:
         soft: 65536
         hard: 65536
     devices:
-      # Se mapean AMBOS nodos DRM: el kernel reenumera card0/card1 y
-      # renderD128/renderD129 entre arranques (visto tras actualizar a 7.0.0-38).
-      # La selección real la hacen las env (ZE_AFFINITY_MASK / level_zero) y el
-      # hardware no-Intel no se expone por Level-Zero, así que no hay ambigüedad.
+      # Solo el iGPU Intel (00:02.0) + NPU. (Los nodos de la RX480 se retiraron
+      # el 2026-10-23 al quitar la GPU del sistema.)
       # by-path: estable por PCI (la reenumeracion del kernel cambia cardN entre
-      # arranques; incluso hubo boots sin card0). Intel=00:02.0, AMD=01:00.0.
+      # arranques; incluso hubo boots sin card0).
       - source: /dev/dri/by-path/pci-0000:00:02.0-card
         target: /dev/dri/card0
         permissions: rwm
       - source: /dev/dri/by-path/pci-0000:00:02.0-render
         target: /dev/dri/renderD128
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:01:00.0-card
-        target: /dev/dri/card1
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:01:00.0-render
-        target: /dev/dri/renderD129
         permissions: rwm
       - /dev/accel/accel0:/dev/accel/accel0
     group_add:
@@ -235,153 +282,9 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
-  # ==========================================
-  # IA-GPU-AMD-RX480 (LM Studio / LMLink)
-  # RX480 aislada del host - este contenedor es el UNICO que accede a la GPU AMD
-  # Host y OpenVINO usan solo Intel Arc (iGPU 00:02.0)
-  # RX480 = renderD128 / card1 (PCI 01:00.0, vendor 1002:67df)
-  # Sin ipc: host - namespace IPC propio para que el GUI del host no detecte
-  # el llmster del contenedor como instancia local. LMLink conecta por TCP.
-  # ==========================================
-  ia-gpu-amd-rx480:
-    build:
-      context: ./ia-gpu-amd-rx480
-      dockerfile: Dockerfile
-    image: ia-gpu-amd-rx480:latest
-    container_name: ia-gpu-amd-rx480
-    # RESTART DESACTIVADO a proposito (2026-10-01). Con la GPU en estado wedged
-    # (page fault + ring timeout, requiere cold boot) "unless-stopped" entra en
-    # bucle de reinicio cada 6s. Reactivar a "unless-stopped" SOLO despues de
-    # validar los cambios de estabilidad en un cold boot (ver
-    # ia-gpu-amd-rx480/DIAGNOSTICO-RX480-2026-10-01.md).
-    restart: "no"
-    ports:
-      - "1235:1234"
-      # 41344 (LMLink) no se publica al host para evitar conflictos
-      # con conexiones efimeras SSH. LMLink no se usa en benchmarks.
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    volumes:
-      - lms_amd_profile:/root/.lmstudio
-      - /home/arkantu/modelos/rx480:/root/.lmstudio/models/rx480:ro
-      - ./ia-gpu-amd-rx480/entrypoint.sh:/root/lms-amd-entrypoint.sh:ro
-      # Bench seguro: loader/unloader con guardas anti-cuelgue (bench-run.sh).
-      - ./ia-gpu-amd-rx480/bench:/opt/bench:ro
-      - ./ia-gpu-amd-rx480/bench-bin:/opt/llama-bench:ro
-      - ./ia-gpu-amd-rx480/results:/opt/bench-results
-      - /var/log/journal:/host-journal:ro
-    # El bench vigila el kernel log para abortar al primer ring timeout (en vez
-    # de dejar la GPU wedged). Dentro del contenedor no hay journalctl y 'dmesg'
-    # necesita CAP_SYSLOG; ademas se monta /dev/kmsg y el journal del host por
-    # si se prefiere leerlo con 'journalctl -D /host-journal'.
-    cap_add:
-      - SYSLOG
-    devices:
-      # Ambos nodos DRM: la reenumeracion del kernel (7.0.0-38) intercambió
-      # card0/card1 y renderD128/renderD129 entre la RX480 y la Arc. El entrypoint
-      # detecta la AMD por PCI vendor (0x1002) y Vulkan la fija con
-      # MESA_VK_DEVICE_SELECT=1002:67df!, así que el nombre del nodo da igual.
-      # by-path: estable por PCI (ver comentario en ia-gpu-intel-openvino).
-      - source: /dev/dri/by-path/pci-0000:00:02.0-card
-        target: /dev/dri/card0
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:00:02.0-render
-        target: /dev/dri/renderD128
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:01:00.0-card
-        target: /dev/dri/card1
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:01:00.0-render
-        target: /dev/dri/renderD129
-        permissions: rwm
-      - /dev/kfd:/dev/kfd
-      - /dev/kmsg:/dev/kmsg
-    environment:
-      - MESA_VK_DEVICE_SELECT=1002:67df!
-      - DRI_PRIME=1
-      - GGML_VK_VISIBLE_DEVICES=0
-      - VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json
-      # Anti ring-timeout: batches de 100 nodos tardan >2s en Polaris ->
-      # kernel declara ring timeout -> GPU reset -> reset falla -> crash.
-      # Con 1 nodo por submit, cada vkQueueSubmit completa en <100ms.
-      - GGML_VK_MAX_NODES_PER_SUBMIT=1
-      - GGML_VK_DISABLE_ASYNC=1
-      - GGML_VK_FORCE_MAX_ALLOCATION_SIZE=2147483648
-      # NOTA (2026-10-01) sobre variables ELIMINADAS tras verificarlas con strings
-      # sobre libggml-vulkan.so / libvulkan_radeon.so y con prueba empirica:
-      #  - RADV_PERFTEST=no_sam : NO EXISTE. El token real de Mesa es 'nosam'
-      #    (sin guion), y ademas en Mesa 25.2.8 ya no es un perftest sino una
-      #    driconf option. Con 'no_sam' RADV lo ignora -> sparseResidency seguia
-      #    en true y el kernel seguia imprimiendo "Disabling VM faults because of
-      #    PRT request!" al crear el device Vulkan. Config muerta, se elimina.
-      #  - GGML_VK_ALLOW_EXOTIC_SUBGROUP_OPS : NO EXISTE en libggml-vulkan.so
-      #    (verificado con strings). El driver Radv de esta version no expone
-      #    subgroups exoticas, asi que era un no-op. Se elimina.
-      #  - DRI_PRIME=1 : la RX480 es el segundo dispositivo; MESA_VK_DEVICE_SELECT
-      #    ya la fija de forma exacta. DRI_PRIME afecta GL/EGL, no a Vulkan.
-      #    Se mantiene por compatibilidad, no hace daño.
-    entrypoint: ["/root/lms-amd-entrypoint.sh"]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:1234/api/v0/models || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  # ==========================================
   # Open WebUI - Frontend unificado para los backends GPU
   # Expone dos conexiones OpenAI-compatible:
   #   1. ia-gpu-intel-openvino (Intel Arc / OpenVINO GenAI) -> http://ia-gpu-intel-openvino:8000
-  #   2. ia-gpu-amd-rx480 (AMD RX480 / LM Studio)            -> http://ia-gpu-amd-rx480:1234
   # Ambos backends no requieren API key real; usamos un placeholder "ollama".
   # Los tags y prefix_id permiten distinguir los modelos de cada GPU en la UI.
   # ==========================================
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: unless-stopped
-    ports:
-      - "3000:8080"
-    volumes:
-      - open-webui-data:/app/backend/data
-    environment:
-      # --- Backends OpenAI-compatible (separados por ';') ---
-      # Backend 0: Intel Arc (OpenVINO GenAI)
-      # Backend 1: AMD RX480 (LM Studio)
-      - ENABLE_OPENAI_API=True
-      - OPENAI_API_BASE_URLS=http://ia-gpu-intel-openvino:8000/v1;http://ia-gpu-amd-rx480:1234/v1
-      - OPENAI_API_KEYS=ollama;ollama
-      - OPENAI_API_CONFIGS={"0":{"prefix_id":"intel-arc","tags":["OpenVINO","Intel-Arc"]},"1":{"prefix_id":"amd-rx480","tags":["LM-Studio","AMD-RX480"]}}
-      # --- Ollama deshabilitado (no hay Ollama en este stack) ---
-      - ENABLE_OLLAMA_API=False
-      # --- Config general ---
-      - WEBUI_AUTH=true
-      - ENABLE_SIGNUP=False
-      - WEBUI_NAME=IA Services Stack
-      # Forzar que las variables de entorno prevalezcan sobre la BD
-      # para que los backends se carguen siempre al arrancar
-      - ENABLE_PERSISTENT_CONFIG=False
-      # Busqueda web nativa de Open WebUI (DuckDuckGo, sin contenedor extra)
-      - ENABLE_WEB_SEARCH=True
-      - WEB_SEARCH_ENGINE=duckduckgo
-      - WEB_SEARCH_RESULT_COUNT=5
-      - WEB_SEARCH_CONCURRENT_REQUESTS=5
-      # MCP tool servers (cargados desde env var porque ENABLE_PERSISTENT_CONFIG=False
-      # hace que Config.get() ignore la BD y use los defaults de DEFAULT_CONFIG)
-      - TOOL_SERVER_CONNECTIONS=[{"url":"http://moodle-ia-mcp:8097/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"moodle-ia","name":"Moodle-IA MCP","description":"Moodle content orchestrator MCP server"}},{"url":"http://172.18.0.1:8765/mcp","path":"/mcp","type":"mcp","auth_type":"none","headers":null,"key":null,"config":{"enable":true,"access_grants":[]},"info":{"id":"zotero-mcp","name":"Zotero MCP","description":"Zotero local library - semantic search, citations, PDF tools"}}]
-      # Open Terminal server (cargado desde env var porque ENABLE_PERSISTENT_CONFIG=False)
-      - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal-local","name":"Open Terminal (Khazad-dum)","enabled":true,"url":"http://open-terminal:8000","path":"/openapi.json","key":"XMaT-ey_ekoJ9zHJITPpNQilqi_o9Sqy7G4q0jo1gyE","auth_type":"bearer"}]
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
