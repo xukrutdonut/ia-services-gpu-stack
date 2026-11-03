@@ -163,15 +163,16 @@ services:
         - node.hostname == khazad-dum
 
   # ==========================================
-  # DOCKER-AGENT (runner de agentes cagent + MCPs locales)
+  # DOCKER-AGENT (runner de agentes cagent)
   # CLI, no servicio: `profiles: ["agent"]` evita que arranque con `up -d`.
   #   docker compose run --rm docker-agent "pregunta"
   #   docker compose run --rm docker-agent            # TUI
-  # Wrapper: ~/.local/bin/docker-agent (envuelve el `run` de arriba).
-  # network_mode: host es requisito, no comodidad: la API local de Zotero
-  # escucha solo en 127.0.0.1:23119 y los modelos (OVMS :8006, embeddings :8012,
-  # LM Studio :1234) tambien estan en loopback del host.
-  # Perfiles: /configs/*.yaml (zotero.yaml activo; template.yaml para uno nuevo).
+  # Wrapper: ~/.local/bin/docker-agent.
+  # Genérico: NO lleva Zotero. Perfil por defecto /configs/default.yaml con las
+  # herramientas nativas de cagent (shell, filesystem, fetch, think).
+  # network_mode: host porque los modelos escuchan en loopback del host
+  # (OVMS :8006, RX480 .80:1237, LM Studio :1234) y cagent rechaza MCP remoto en
+  # direcciones privadas.
   # ==========================================
   docker-agent:
     profiles: ["agent"]
@@ -185,27 +186,47 @@ services:
     image: docker-agent:local
     container_name: docker-agent
     network_mode: host
-    working_dir: /work
+    working_dir: /workspace
     environment:
       - TZ=Europe/Madrid
-      - AGENT_CONFIG=${AGENT_CONFIG:-/configs/zotero.yaml}
+      - AGENT_CONFIG=${AGENT_CONFIG:-/configs/default.yaml}
+    volumes:
+      - /home/arkantu/workspace/docker-agent/configs:/configs:ro
+      - /home/arkantu/workspace/docker-agent/integrations:/integrations:ro
+      # el agente trabaja sobre el workspace del host y deja sus salidas en out/
+      - /home/arkantu/workspace:/workspace
+      - /home/arkantu/workspace/docker-agent/out:/out
+      # historial de sesiones de cagent (para depurar turnos y tool calls)
+      - /home/arkantu/.local/share/docker-agent/cagent:/home/agent/.cagent
+    stdin_open: true
+    tty: true
+
+  # Integración Zotero del runner (opt-in, NO es el perfil por defecto). Es la pieza
+  # donde enganchará el plugin de Zotero cuando se enrute al cagent.
+  #   docker compose --profile agent-zotero run --rm docker-agent-zotero "..."
+  docker-agent-zotero:
+    profiles: ["agent-zotero"]
+    image: docker-agent:local
+    container_name: docker-agent-zotero
+    network_mode: host
+    working_dir: /workspace
+    environment:
+      - TZ=Europe/Madrid
+      - AGENT_CONFIG=${AGENT_CONFIG:-/integrations/zotero/zotero.yaml}
       - ZOTERO_LOCAL=true
       # Sin esto FastMCP pinta su banner ASCII en stdout y rompe el stdio JSON-RPC
       # del MCP de Zotero: el agente se queda colgado sin error.
       - FASTMCP_SHOW_SERVER_BANNER=false
       - FASTMCP_CHECK_FOR_UPDATES=off
-      # La superficie completa del MCP son ~23k tokens por peticion.
       - ZOTERO_MCP_TOOLSETS=${ZOTERO_MCP_TOOLSETS:-semantic}
     volumes:
       - /home/arkantu/workspace/docker-agent/configs:/configs:ro
-      # config + indice semantico del MCP de Zotero (rw: el MCP escribe su cache)
+      - /home/arkantu/workspace/docker-agent/integrations:/integrations:ro
       - /home/arkantu/.config/zotero-mcp:/home/agent/.config/zotero-mcp
-      # biblioteca de Zotero en solo lectura (adjuntos y texto completo)
       - /home/arkantu/Zotero:/home/agent/Zotero:ro
-      # historial de sesiones de cagent (para depurar turnos y tool calls)
+      - /home/arkantu/workspace:/workspace
+      - /home/arkantu/workspace/docker-agent/out:/out
       - /home/arkantu/.local/share/docker-agent/cagent:/home/agent/.cagent
-      # salida: informes y ficheros que genere el agente
-      - /home/arkantu/workspace/docker-agent/out:/work
     stdin_open: true
     tty: true
 
