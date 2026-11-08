@@ -20,14 +20,12 @@ MOODLE_TOKEN = os.environ.get("MOODLE_TOKEN", "734d7e02718f02570a70bdbc87698c78"
 # Endpoints de inferencia local
 INTEL_OPENVINO_URL = os.environ.get("INTEL_OPENVINO_URL", "http://lms-optimum-intel:8000/v1")
 INTEL_FALLBACK_URL = os.environ.get("INTEL_FALLBACK_URL", "http://192.168.0.100:8006/v1")
-AMD_NODE_URL = os.environ.get("AMD_NODE_URL", "http://192.168.0.80:1234/v1")
 
 DEFAULT_MODEL_INTEL = os.environ.get("DEFAULT_MODEL_INTEL", "Qwen3-30B-A3B-Instruct-2507-int4-ov")
-DEFAULT_MODEL_AMD = os.environ.get("DEFAULT_MODEL_AMD", "qwen3-30b-a3b")
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "900"))
 
 # ==========================================
-# CLIENTE LLM LOCAL (INTEL ARC & AMD NODE)
+# CLIENTE LLM LOCAL (INTEL ARC)
 # ==========================================
 async def query_llm(
     prompt: str,
@@ -36,25 +34,22 @@ async def query_llm(
     temperature: float = 0.3,
     max_tokens: int = 3500
 ) -> str:
-    """Envía peticiones de inferencia a los motores locales (Intel Arc / AMD RX480)."""
+    """Envía peticiones de inferencia a los motores locales (Intel Arc)."""
     messages = [
         {"role": "system", "content": system_instruction},
         {"role": "user", "content": prompt}
     ]
     
     endpoints = []
-    if model_target.lower() == "amd":
-        endpoints = [(AMD_NODE_URL, DEFAULT_MODEL_AMD, "AMD RX480")]
-    elif model_target.lower() == "intel":
+    if model_target.lower() == "intel":
         endpoints = [
             (INTEL_OPENVINO_URL, DEFAULT_MODEL_INTEL, "Intel Arc (Direct)"),
             (INTEL_FALLBACK_URL, DEFAULT_MODEL_INTEL, "Intel Arc (Fallback LAN)")
         ]
-    else:  # auto: Intel primero, luego AMD
+    else:  # auto / cualquier otro valor: Intel directo y su fallback LAN
         endpoints = [
             (INTEL_OPENVINO_URL, DEFAULT_MODEL_INTEL, "Intel Arc (Direct)"),
-            (INTEL_FALLBACK_URL, DEFAULT_MODEL_INTEL, "Intel Arc (Fallback LAN)"),
-            (AMD_NODE_URL, DEFAULT_MODEL_AMD, "AMD RX480")
+            (INTEL_FALLBACK_URL, DEFAULT_MODEL_INTEL, "Intel Arc (Fallback LAN)")
         ]
 
     last_err = None
@@ -411,22 +406,85 @@ def _parse_questions(xml_text: str):
     return [q for q in root.findall("question") if (q.get("type") or "") != "category"]
 
 
+# CDATA / comentarios / processing-instructions / declaraciones, o una etiqueta normal
+_TAG_RE = re.compile(
+    r"<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|<![^>]*>"
+    r"|<(/?)([A-Za-z_][\w.:-]*)((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>",
+    re.DOTALL,
+)
+
+
+def _balance_tags(xml_text: str) -> str:
+    """Reequilibra el anidamiento de etiquetas de una salida imperfecta del LLM.
+
+    Corrige los dos defectos que se ven en la práctica:
+      - cierre mal nombrado (`</feedback>` cerrando `<generalfeedback>`);
+      - bloque abierto sin cerrar (`<feedback>` sin `</feedback>` antes de `</answer>`),
+        en cuyo caso se cierran implícitamente los hijos pendientes.
+    Las etiquetas de cierre huérfanas se descartan en lugar de romper el documento.
+    """
+    out, stack, pos = [], [], 0
+    for m in _TAG_RE.finditer(xml_text):
+        out.append(xml_text[pos:m.start()])
+        pos = m.end()
+        raw = m.group(0)
+        name = m.group(2)
+        if name is None:  # CDATA, comentario, declaración: se copia tal cual
+            out.append(raw)
+            continue
+        if m.group(1) == "/":
+            target = name
+            if target not in stack:
+                # typo típico: prefijo/sufijo de una etiqueta abierta (feedback/generalfeedback)
+                target = next((t for t in reversed(stack)
+                               if t.endswith(name) or name.endswith(t)), None)
+                if target is None:
+                    continue  # cierre huérfano: se descarta
+            while stack and stack[-1] != target:
+                out.append(f"</{stack.pop()}>")
+            if stack:
+                stack.pop()
+            out.append(f"</{target}>")
+        elif raw.endswith("/>"):
+            out.append(raw)
+        else:
+            stack.append(name)
+            out.append(raw)
+    out.append(xml_text[pos:])
+    while stack:
+        out.append(f"</{stack.pop()}>")
+    return "".join(out)
+
+
 def _salvage_quiz_xml(xml_text: str) -> str:
     """Intenta convertir una salida imperfecta del LLM en XML de Moodle parseable.
 
-    1) Escapa '&' sueltos.  2) Recorta desde el primer <question> hasta el último </question>
-    y lo envuelve en <quiz>.  3) Cierra etiquetas desbalanceadas de bloques <question>.
+    1) Escapa '&' sueltos.  2) Reequilibra etiquetas mal cerradas (_balance_tags).
+    3) Recorta desde el primer <question> hasta el último </question> y lo envuelve en <quiz>.
+    4) Último recurso: conserva solo las preguntas que parsean por separado.
     """
-    candidates = [xml_text]
-    candidates.append(_AMP.sub("&amp;", xml_text))
+    variants = []
 
-    first, last = xml_text.find("<question"), xml_text.rfind("</question>")
-    if first != -1 and last > first:
-        inner = xml_text[first:last + len("</question>")]
-        candidates.append(f"<quiz>{inner}</quiz>")
-        candidates.append(_AMP.sub("&amp;", f"<quiz>{inner}</quiz>"))
+    def add(cand):
+        if cand and cand not in variants:
+            variants.append(cand)
 
-    for cand in candidates:
+    for base in (xml_text, _AMP.sub("&amp;", xml_text)):
+        add(base)
+        try:
+            add(_balance_tags(base))
+        except Exception:
+            pass
+        first, last = base.find("<question"), base.rfind("</question>")
+        if first != -1 and last > first:
+            wrapped = f"<quiz>{base[first:last + len('</question>')]}</quiz>"
+            add(wrapped)
+            try:
+                add(_balance_tags(wrapped))
+            except Exception:
+                pass
+
+    for cand in variants:
         try:
             _parse_questions(cand)
             return cand
@@ -439,11 +497,21 @@ def _salvage_quiz_xml(xml_text: str) -> str:
         blocks = re.findall(r"<question\b.*?</question>", xml_text[first:last + len("</question>")], re.DOTALL)
         good = []
         for b in blocks:
-            try:
-                ET.fromstring(f"<quiz>{b}</quiz>")
-                good.append(b)
-            except Exception:
-                continue
+            for cand in (b, _AMP.sub("&amp;", b)):
+                try:
+                    bal = _balance_tags(cand)
+                except Exception:
+                    bal = cand
+                for final in (cand, bal):
+                    try:
+                        ET.fromstring(f"<quiz>{final}</quiz>")
+                        good.append(final)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    continue
+                break
         if good:
             return "<quiz>\n" + "\n".join(good) + "\n</quiz>"
     raise ValueError("no se pudo reparar el XML")
@@ -648,7 +716,7 @@ async def moodle_direct_llm_assist(
     system_instruction: str = "Eres un asistente de IA para educación médica y plataformas Moodle.",
     model_target: str = "auto"
 ) -> Dict[str, Any]:
-    """Permite realizar consultas directas y canalizar prompts a los nodos LLM locales (Intel Arc / AMD RX480)."""
+    """Permite realizar consultas directas y canalizar prompts a los nodos LLM locales (Intel Arc)."""
     try:
         response = await query_llm(
             prompt=prompt,
