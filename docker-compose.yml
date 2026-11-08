@@ -160,32 +160,6 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
-  # Moodle Course Studio - frontend de configuracion y ejecucion del pipeline
-  # de creacion de cursos (moodle-ia-mcp + IA local). UI en :8098.
-  moodle-course-studio:
-    build:
-      context: ./moodle-course-studio
-      dockerfile: Dockerfile
-    image: moodle-course-studio:latest
-    container_name: moodle-course-studio
-    restart: unless-stopped
-    ports:
-      - "8098:8098"
-    environment:
-      - MCP_URL=http://moodle-ia-mcp:8097/mcp
-      - MOODLE_PUBLIC_URL=https://moodle.neuropedialab.org
-      - CALL_TIMEOUT=1800
-    volumes:
-      - ./moodle-course-studio/data:/data/jobs
-    depends_on:
-      - moodle-ia-mcp
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
   # ==========================================
   # DOCKER-AGENT (runner de agentes cagent)
   # CLI, no servicio: `profiles: ["agent"]` evita que arranque con `up -d`.
