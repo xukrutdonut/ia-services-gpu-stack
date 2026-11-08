@@ -148,6 +148,36 @@ model_list:
       gpu: intel-npu
       lane: embed
 
+  # Embeddings de IMAGEN en el Hailo-8L del Pi5 (.80). No es texto: el input son
+  # imagenes en data URI base64, URL http(s) o base64 suelto, y devuelve 640 d
+  # (CLIP ResNet-50x4, ~195 ms/imagen). El tower de texto no existe para Hailo-8L,
+  # asi que sirve para similitud imagen-imagen, no para buscar con palabras.
+  - model_name: embed-vision
+    litellm_params:
+      model: openai/clip-resnet-50x4-hailo
+      api_base: http://192.168.0.80:8089/v1
+      api_key: "sk-mesh"
+      max_parallel_requests: 1
+      rpm: 120
+      timeout: 180
+    model_info:
+      gpu: hailo-8l
+      lane: embed
+
+  # OCR del Hailo-8L como "chat": se le pasa la imagen en content[].image_url y
+  # devuelve el texto extraido. No conversa; sin imagen responde 400.
+  - model_name: ocr
+    litellm_params:
+      model: openai/ocr-hailo-8l
+      api_base: http://192.168.0.80:8089/v1
+      api_key: "sk-mesh"
+      max_parallel_requests: 1
+      rpm: 60
+      timeout: 600
+    model_info:
+      gpu: hailo-8l
+      lane: ocr
+
   - model_name: embed-lite
     litellm_params:
       model: openai/nomic-embed-text-v1.5-ov

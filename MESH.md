@@ -31,6 +31,8 @@ cliente (Hermes, pi, docker-agent, Open WebUI, scripts)
 | `arc`        | Arc Qwen3-30B-A3B-int4  | —            | tareas de fondo de Open WebUI (título/tags/follow-up) y respaldo |
 | `embed`      | Arc qwen3-embedding     | nomic        | RAG                                  |
 | `embed-npu`  | NPU qwen3-embedding int4 | —           | RAG que libera la iGPU (ver nota de pooling) |
+| `embed-vision` | Hailo-8L CLIP ResNet-50x4 | —        | embeddings de IMAGEN (640 d) en el Pi5 .80 |
+| `ocr`        | Hailo-8L det+rec        | —            | OCR: se le pasa la imagen, devuelve el texto |
 
 ## Enrutado por velocidad (bench 2026-11-08, prompt único 2k, temp 0)
 
@@ -70,6 +72,33 @@ last-token (lo que recomienda Qwen3); el grafo de OVMS de la iGPU usa CLS
 `embed-npu`: un índice RAG debe construirse y consultarse con el mismo alias.
 `zotero-index.service` ya indexa contra la NPU (:8012).
 
+## Hailo-8L del Pi5 (192.168.0.80)
+
+El Hailo-8L solo tiene modelos de **visión**: no existe tower de texto, así que no
+puede hacer embeddings de texto. Aporta dos cosas al mesh:
+
+- `embed-vision` — CLIP ResNet-50x4 (HEF del zoo v2.17.0), 640 d, ~195 ms/imagen
+  (340 ms cruzando el mesh). El `input` son **imágenes** (data URI base64, URL o
+  base64 suelto); un texto devuelve 400. Es similitud imagen-imagen y zero-shot a
+  mano, no búsqueda con palabras: para eso haría falta el tower de texto de CLIP
+  en CPU, que no está desplegado.
+- `ocr` — det+rec de PaddleOCR en la NPU. Se consume como chat: la imagen va en
+  `content[].image_url` y la respuesta es el texto. ~0,9 s una captura limpia,
+  ~5,7 s una página escaneada completa. Sin imagen responde 400.
+
+Ambos viven en el mismo servicio que ya hacía OCR (`:8089`, contenedor
+`ocr-pdf-hailo`, unidad `ocr-pdf-hailo.service`): se le añadieron
+`/v1/embeddings`, `/v1/chat/completions` y `/v1/models`, y se montó el HEF de CLIP
+en `/app/clip_models`. El motivo es que **el dispositivo Hailo es exclusivo de un
+proceso**: la app tiene el `VDevice` abierto desde el arranque y un segundo proceso
+recibe `HAILO_OUT_OF_PHYSICAL_DEVICES` (error 74) — probado, también con
+`group_id="SHARED"` y con el servicio multi-proceso. CLIP se configura como una
+tercera red del mismo `VDevice` (round-robin, grupo SHARED), que sí convive con
+det+rec: configurar las tres a la vez tarda 0,3 s.
+
+El HEF es `clip_resnet_50x4.hef` de `ModelZoo/Compiled/v2.17.0/hailo8l/` (126 MB);
+v2.18 y posteriores responden 403 en el S3 del zoo.
+
 ### Arc/OVMS: barrido de modelos rápidos (2026-11-08)
 
 Pregunta: ¿puede la iGPU servir un carril rápido con otro modelo? Medido con OVMS
@@ -102,6 +131,36 @@ repo como versión numérica en `config.json`).
 
 Si el escritorio se apaga (llama-swap parado), `chat` cae solo a la Arc en ~3 s
 (cooldown 60 s), y vuelve a la V100 cuando el backend revive.
+
+### ¿Dividir una tarea compleja la acelera? (medido 2026-11-08)
+
+Sí, pero el factor es **~1,5x con 4 ramas**, no 4x. El servidor del 35B corre con
+`--parallel 4 --kv-unified` (antes 2), 32.768 tokens de contexto total y 24,5 GB de VRAM.
+
+| ramas en vuelo | agregado | TTFT | fin de cada rama (400 tok) |
+|---|---|---|---|
+| 1 | 116 tok/s | 0,15 s | 3,4 s |
+| 2 | 152 tok/s | 0,32 s | 5,3 s |
+| 4 | 172 tok/s | 0,72 s | 8,6-9,5 s (todas a la vez) |
+| 6 | 171 tok/s | 0,59 s / 8,97 s | 4 acaban a ~9 s, 2 esperan otros 9 s |
+
+Tres reglas que salen de la tabla:
+
+1. **El techo del batching es ~172 tok/s**: la cuarta secuencia ya no añade nada y la
+   quinta solo hace cola. Dividir en más de 4 ramas empeora la latencia de las últimas
+   sin ganar nada. `max_parallel_requests` de `chat`/`worker-big` = 4 (antes 2, que
+   encolaba la mitad del fan-out en LiteLLM).
+2. **El prefill no se divide**. Medido: 6,4k tokens → 9,1 s y 28,9k → 45,1 s (~650-700
+   tok/s, plano con la concurrencia). Partir un documento de 29k en 4 ramas de 7k lee
+   los mismos 29k tokens y cuesta los mismos ~45 s. Solo se ahorra si las ramas comparten
+   un **resumen** previo (o RAG por trozos) en vez del documento entero.
+3. **Una respuesta de 1.600 tokens**: monolítica ≈ 14 s; en 4 ramas de 400 ≈ 9,7 s
+   (1,45x); en 6 ramas empeora. La fusión de las ramas cuesta un turno más, así que la
+   ganancia neta realista es **1,3-1,4x** en trabajo de generación.
+
+Verificado a través de la puerta: 4 peticiones de 200 tok por LiteLLM acaban todas en
+4,5 s (antes 2+2 tardaban ~7,3 s). El contexto máximo sigue siendo 32k: un prompt de
+~29k entra, uno de ~14k palabras (≈50k tokens) devuelve 400.
 
 ## Cola y backpressure (dos niveles)
 
@@ -163,3 +222,31 @@ docker logs litellm --since 5m | grep -i fallback
 - La RX480 del Pi5 se cae del bus PCIe (`lspci` sin dispositivo): el rescan no la
   devuelve, hace falta corte de alimentación real. Mientras tanto `worker`/`tiny` se
   desvían solos por la sonda de salud.
+- **Los modelos de la UI llevan prefijo `mesh.`** (`mesh.chat`, `mesh.arc`, ...). Poner
+  `task.model.default = "arc"` deja las tareas de fondo (título, tags, follow-up) sin
+  modelo válido y caen al modelo del chat, robando un slot de la V100. El valor correcto
+  es `"mesh.arc"`. Comprobar con `GET /api/models` (ids reales), no a ojo.
+
+## Compresión de contexto en Open WebUI (activa 2026-11-08)
+
+Nativa (`Admin → Settings → Chat → Context Compaction`), guardada en `webui.db`
+(`ENABLE_PERSISTENT_CONFIG=true`, no hay variables de entorno):
+
+```
+chat.context_compaction.enable                = true
+chat.context_compaction.token_threshold       = 24000   # 75% del ctx real de 32k
+chat.context_compaction.retention_percentage  = 40
+chat.context_compaction.model                 = "mesh.chat"
+chat.context_compaction.token_cap             = null
+chat.context_compaction.prompt_template       = ""
+```
+
+- El umbral por defecto (80.000) **nunca se dispara** con `--ctx-size 32768`: hay que
+  bajarlo. 24k deja ~8k de margen para el prompt de sistema y la respuesta.
+- El resumen lo hace el mismo 35B (~650-700 t/s de prefill): una conversación de 24k
+  cuesta ~35 s de resumen, una vez, en un slot. `mesh.fast` sería más rápido pero
+  obligaría a descargar el 35B (`ttl: 3600`), así que no compensa.
+- `rag.full_context = false`: los PDF adjuntos entran por top-k de fragmentos, no
+  enteros. Es lo que evita prompts de 29k tokens (~45 s de prefill).
+- Verificar que la app lo cargó (no solo la BD): `GET /api/v1/configs/export` con JWT
+  admin devuelve `chat.context_compaction.*` con las claves planas y puntos.
