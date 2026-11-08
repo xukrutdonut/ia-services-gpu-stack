@@ -4,7 +4,6 @@ networks:
 volumes:
   openvino-models: null
   ov_cache: null
-  ov_cache_fast: null
   lms-config: null
   open-webui-data: null
   open-terminal-data: null
@@ -321,69 +320,6 @@ services:
       - OMP_NUM_THREADS=16
       - KMP_AFFINITY=granularity=fine,compact,1,0
       - NPU_PLATFORM=3720
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  # Instancia "chat rapido": gpt-oss-20b (3,6B activos) en :8009.
-  # DESACTIVADA (2026-11-04): el A/B dio prefill 235 tok/s (1,5x Qwen) pero
-  # decode 15-16 tok/s y gasta tokens de razonamiento -> 10,6 s vs 3,5 s
-  # por turno corto. Arrancar a mano: docker compose --profile chatfast up -d ia-gpu-intel-fast
-  ia-gpu-intel-fast:
-    profiles: ["chatfast"]
-    image: openvino/model_server:latest-gpu
-    container_name: ia-gpu-intel-fast
-    restart: unless-stopped
-    shm_size: "8gb"
-    mem_limit: 30g
-    memswap_limit: 30g
-    ports:
-      - "8009:8000"
-    ipc: host
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    devices:
-      - source: /dev/dri/by-path/pci-0000:00:02.0-card
-        target: /dev/dri/card0
-        permissions: rwm
-      - source: /dev/dri/by-path/pci-0000:00:02.0-render
-        target: /dev/dri/renderD128
-        permissions: rwm
-    group_add:
-      - "44"
-      - "992"
-    volumes:
-      - /home/arkantu/produccion/openvino-models/.openvino-ir:/models:rw
-      - ov_cache_fast:/tmp/ov_cache
-    command:
-      - --config_path
-      - /models/config.chat-fast.json
-      - --rest_port
-      - "8000"
-      - --port
-      - "9000"
-      - --log_level
-      - INFO
-    environment:
-      - ONEAPI_DEVICE_SELECTOR=level_zero:0
-      - ZES_ENABLE_SYSMAN=1
-      - ZE_AFFINITY_MASK=0
-      - UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1
-      - SYCL_PI_LEVEL_ZERO_USM_RESIDENT=1
-      - NEOReadDebugKeys=1
-      - OverrideGpuAddressSpace=48
-      - DisableImplicitScaling=0
-      - IGC_EnableDPEmulation=0
-      - OMP_NUM_THREADS=8
-      - KMP_AFFINITY=granularity=fine,compact,1,0
     networks:
       - ia-routing-stack
     deploy:
