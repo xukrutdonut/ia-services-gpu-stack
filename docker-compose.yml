@@ -93,6 +93,29 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
+  # Mismo servidor, transporte streamable-http (POST /mcp), que es el UNICO
+  # que entiende Open WebUI 0.13 (su cliente usa streamable_http_client, sin SSE).
+  searxng-mcp-http:
+    build:
+      context: ./mcp-servers/searxng-mcp
+      dockerfile: Dockerfile
+    image: searxng-mcp:latest
+    container_name: searxng-mcp-http
+    restart: unless-stopped
+    command: ["python", "app.py", "--port", "8093", "--transport", "streamable-http"]
+    ports:
+      - "8093:8093"
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+    depends_on:
+      - searxng
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
   nano-fs-tools-mcp:
     build:
       context: ./mcp-servers/nano-fs-tools-mcp
