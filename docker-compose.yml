@@ -4,9 +4,11 @@ networks:
 volumes:
   openvino-models: null
   ov_cache: null
+  ov_cache_fast: null
   lms-config: null
   open-webui-data: null
   open-terminal-data: null
+  mesh-orchestrator-data: null
 services:
   # ==========================================
   # SECCIÓN MCP (Model Context Protocol Servers)
@@ -303,9 +305,160 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
-  # Open WebUI - Frontend unificado para los backends GPU
-  # Expone dos conexiones OpenAI-compatible:
-  #   1. ia-gpu-intel-openvino (Intel Arc / OpenVINO GenAI) -> http://ia-gpu-intel-openvino:8000
-  # Ambos backends no requieren API key real; usamos un placeholder "ollama".
-  # Los tags y prefix_id permiten distinguir los modelos de cada GPU en la UI.
+  # Instancia "chat rapido": gpt-oss-20b (3,6B activos) en :8009.
+  # DESACTIVADA (2026-11-04): el A/B dio prefill 235 tok/s (1,5x Qwen) pero
+  # decode 15-16 tok/s y gasta tokens de razonamiento -> 10,6 s vs 3,5 s
+  # por turno corto. Arrancar a mano: docker compose --profile chatfast up -d ia-gpu-intel-fast
+  ia-gpu-intel-fast:
+    profiles: ["chatfast"]
+    image: openvino/model_server:latest-gpu
+    container_name: ia-gpu-intel-fast
+    restart: unless-stopped
+    shm_size: "8gb"
+    mem_limit: 30g
+    memswap_limit: 30g
+    ports:
+      - "8009:8000"
+    ipc: host
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    devices:
+      - source: /dev/dri/by-path/pci-0000:00:02.0-card
+        target: /dev/dri/card0
+        permissions: rwm
+      - source: /dev/dri/by-path/pci-0000:00:02.0-render
+        target: /dev/dri/renderD128
+        permissions: rwm
+    group_add:
+      - "44"
+      - "992"
+    volumes:
+      - /home/arkantu/produccion/openvino-models/.openvino-ir:/models:rw
+      - ov_cache_fast:/tmp/ov_cache
+    command:
+      - --config_path
+      - /models/config.chat-fast.json
+      - --rest_port
+      - "8000"
+      - --port
+      - "9000"
+      - --log_level
+      - INFO
+    environment:
+      - ONEAPI_DEVICE_SELECTOR=level_zero:0
+      - ZES_ENABLE_SYSMAN=1
+      - ZE_AFFINITY_MASK=0
+      - UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS=1
+      - SYCL_PI_LEVEL_ZERO_USM_RESIDENT=1
+      - NEOReadDebugKeys=1
+      - OverrideGpuAddressSpace=48
+      - DisableImplicitScaling=0
+      - IGC_EnableDPEmulation=0
+      - OMP_NUM_THREADS=8
+      - KMP_AFFINITY=granularity=fine,compact,1,0
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
   # ==========================================
+  # MALLA DE INFERENCIA (2026-11-08)
+  # LiteLLM = unica puerta OpenAI-compatible. El nombre del modelo elige GPU:
+  #   chat -> Arc iGPU (OVMS) | deep/lms27/vision/worker-big -> V100 (llama-swap :8011) | worker -> Arc iGPU (paralelo barato)
+  # Cola: max_parallel_requests por backend (el resto espera) + rpm (429 al saturarse)
+  #       + cooldown/fallbacks (si un backend falla, entra el siguiente).
+  # Open WebUI = frontend de la malla (solo habla con LiteLLM).
+  # mesh-orchestrator = cola acotada por carril + subagentes (fan-out con planner).
+  # ==========================================
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_LOG=INFO
+      - STORE_MODEL_IN_DB=False
+      - TZ=Europe/Madrid
+    # llama-swap corre en el host (necesita la V100 por CUDA, que Docker no ve por CDI)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
+      - OPENAI_API_KEYS=${LITELLM_MASTER_KEY}
+      - ENABLE_OPENAI_API=true
+      - ENABLE_OLLAMA_API=false
+      - DEFAULT_MODELS=chat
+      - WEBUI_URL=http://192.168.0.100:3000
+      - WEBUI_SECRET_KEY=${OPENWEBUI_SECRET_KEY}
+      - ENABLE_SIGNUP=true
+      - ENABLE_PERSISTENT_CONFIG=true
+      - TZ=Europe/Madrid
+    depends_on:
+      - litellm
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
+
+  mesh-orchestrator:
+    build:
+      context: ./mesh-orchestrator
+    image: mesh-orchestrator:local
+    container_name: mesh-orchestrator
+    restart: unless-stopped
+    ports:
+      - "4010:4010"
+    environment:
+      - LITELLM_BASE=http://litellm:4000/v1
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - MAX_QUEUE_PER_LANE=100
+      - LANE_CONCURRENCY={"chat":2,"deep":1,"lms27":1,"vision":1,"worker":4,"worker-big":2}
+      - ALLOW_SHELL=0
+      - TASK_TIMEOUT=900
+      - DATA_DIR=/data
+      # sonda de salud: si el nodo esta caido, el carril se desvia sin esperar el timeout del gateway
+      - LANE_HEALTH={"worker":"http://ia-gpu-intel-openvino:8000/v1/models"}
+      - LANE_FALLBACK={"worker":"chat"}
+      - LANE_DOWN_TTL=60
+      - LANE_HEALTH_TIMEOUT=3
+      - TZ=Europe/Madrid
+    volumes:
+      - mesh-orchestrator-data:/data
+    depends_on:
+      - litellm
+    networks:
+      - ia-routing-stack
+    deploy:
+      placement:
+        constraints:
+        - node.hostname == khazad-dum
