@@ -17,8 +17,13 @@ services:
   # Open Terminal - servidor REST oficial de open-webui/open-terminal
   # Integracion nativa en Open WebUI (Admin Settings -> Integrations -> Open Terminal)
   # Da barra lateral con file browser, upload/download, editor y ejecucion de comandos
+  # Imagen propia: open-terminal/Dockerfile anade pip + toolchain de programacion/IA
+  # sobre ghcr.io/open-webui/open-terminal:slim (que no trae pip a proposito).
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:slim
+    build:
+      context: ./open-terminal
+      dockerfile: Dockerfile
+    image: open-terminal:tools
     container_name: open-terminal
     restart: unless-stopped
     ports:
