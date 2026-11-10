@@ -348,12 +348,19 @@ services:
       - "3000:8080"
     volumes:
       - open-webui-data:/app/backend/data
+    # el motor ninfer (V100) vive en el host: sin esto host.docker.internal resuelve
+    # a 127.0.0.1 dentro del contenedor y la conexion se rechaza
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - OPENAI_API_BASE_URLS=http://litellm:4000/v1
+      # El selector de Open WebUI ve SOLO el motor ninfer: se conecta directo a :8090
+      # (id "ninfer", auth deshabilitada). Los alias de malla (arc, ocr, embed-*) viven
+      # en litellm:4000 y solo los usa la tool mesh_delegate, no el chat.
+      - OPENAI_API_BASE_URLS=http://host.docker.internal:8090/v1
       - OPENAI_API_KEYS=${LITELLM_MASTER_KEY}
       - ENABLE_OPENAI_API=true
       - ENABLE_OLLAMA_API=false
-      - DEFAULT_MODELS=chat
+      - DEFAULT_MODELS=ninfer
       - WEBUI_URL=http://192.168.0.100:3000
       - WEBUI_SECRET_KEY=${OPENWEBUI_SECRET_KEY}
       - ENABLE_SIGNUP=true

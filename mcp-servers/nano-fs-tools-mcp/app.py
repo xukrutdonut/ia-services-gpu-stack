@@ -21,10 +21,24 @@ INTEL_OPENVINO_URL = os.environ.get("INTEL_OPENVINO_URL", LMSTUDIO_URL)
 INTEL_HOST_URL = os.environ.get("INTEL_HOST_URL", LMSTUDIO_URL)
 AMD_NODE_URL = os.environ.get("AMD_NODE_URL", LMSTUDIO_URL)
 
+HOST_WORKSPACE_PREFIXES = [
+    f"/home/{os.environ.get('HOST_USER', 'arkantu')}/workspace",
+    "/home/arkantu/workspace",
+]
+
 def safe_path(p: str) -> Path:
-    target = (WORKSPACE_DIR / p).resolve()
+    path = Path(p).expanduser()
+    if path.is_absolute():
+        s = str(path)
+        for pref in HOST_WORKSPACE_PREFIXES:
+            if s == pref:
+                return WORKSPACE_DIR.resolve()
+            if s.startswith(pref + "/"):
+                return (WORKSPACE_DIR / s[len(pref) + 1:]).resolve()
+        # Ruta absoluta dentro del contenedor (p.ej. /workspace/...)
+        return path.resolve()
     # Permitir workspace o rutas dentro del contenedor
-    return target
+    return (WORKSPACE_DIR / path).resolve()
 
 # ==========================================
 # 1. HERRAMIENTAS DE PLANIFICACIÓN (PLAN TOOLS)

@@ -8,27 +8,36 @@ cliente (Hermes, pi, docker-agent, Open WebUI, scripts)
         │  http://<host>:4000/v1   Bearer $LITELLM_MASTER_KEY
         ▼
      LiteLLM  ── alias ──▶ carril ──▶ backend
-        │                              ├── Arc iGPU  (OVMS :8006 → interno :8000)
-        │                              ├── V100      (llama-swap :8011, systemd usuario)
-        │                              └── RX480     (Pi5 .80 :1237, Vulkan)
+        │                              ├── V100  ninfer-serve :8090   ← MOTOR PRINCIPAL
+        │                              ├── Arc iGPU (OVMS :8006 → interno :8000)
+        │                              ├── Hailo-8L Pi5 .80:8089  (OCR + CLIP imagen)
+        │                              ├── NPU Intel :8012        (embeddings texto)
+        │                              └── RX480 Pi5 .80:1237     (Vulkan, solo pi-nas)
         ▼
   mesh-orchestrator :4010   cola acotada + subagentes (jobs / fanout)
         ▼
-  Open WebUI :3000          frontend, habla solo con LiteLLM
+  Open WebUI :3000 (host) → :8080 (contenedor)   frontend, habla solo con LiteLLM
 ```
+
+**Desde 2026-11-09 todos los alias de TEXTO apuntan al mismo motor**: `ninfer-serve`
+en la V100 (:8090, 262k de contexto). Los nombres viejos se mantienen para no romper
+clientes (`~/.pi`, wp-translator, wp-editorial, scripts), pero `chat`, `deep`, `fast`,
+`lms27`, `worker-big` y `ninfer` son el **mismo backend**: ya no hay swap de modelos ni
+dos motores en la V100 (el 35B ocupa 28 de los 32 GB, no cabe otro).
 
 ## Alias
 
-| alias        | primero                 | fallback     | uso                                  |
-|--------------|-------------------------|--------------|--------------------------------------|
-| `chat`       | V100 35B-A3B 32k MTP    | Arc          | chat general, tool-calling (lo rápido) |
-| `deep`       | V100 35B-A3B 32k MTP    | Arc          | documentos largos, código            |
-| `fast`       | V100 Qwen3.5-4B         | chat → Arc   | respuestas cortas donde la calidad no importa |
-| `lms27`      | V100 Qwen3.8-27B        | Arc          | segunda opinión en la V100 (denso, 32 tok/s) |
-| `vision`     | V100 35B + mmproj       | deep → Arc   | imágenes                             |
-| `worker-big` | V100 35B-A3B (fan-out)  | worker       | fan-out con más calidad, mismo modelo que `chat` (sin swap) |
-| `worker`     | Arc Qwen3-30B-A3B-int4  | arc          | fan-out en la iGPU, no toca la V100  |
-| `arc`        | Arc Qwen3-30B-A3B-int4  | —            | tareas de fondo de Open WebUI (título/tags/follow-up) y respaldo |
+| alias        | backend real             | fallback     | uso                                  |
+|--------------|--------------------------|--------------|--------------------------------------|
+| `ninfer`     | V100 ninfer-serve 262k   | Arc          | motor principal (135 t/s decode)     |
+| `chat`       | V100 ninfer-serve 262k   | Arc          | chat general, tool-calling           |
+| `deep`       | V100 ninfer-serve 262k   | Arc          | documentos largos, código            |
+| `fast`       | V100 ninfer-serve 262k   | worker       | alias histórico (ya no es un 4B)     |
+| `lms27`      | V100 ninfer-serve 262k   | Arc          | alias histórico (ya no es un 27B)    |
+| `worker-big` | V100 ninfer-serve 262k   | worker       | fan-out con más calidad              |
+| `vision`     | V100 ninfer `--vision`   | —            | imágenes y vídeo (ctx 32k por petición) |
+| `worker`     | Arc Qwen3-30B-A3B-int4   | arc          | subagente en la iGPU, no toca la V100 |
+| `arc`        | Arc Qwen3-30B-A3B-int4   | —            | tareas de fondo de Open WebUI (título/tags/follow-up) y respaldo |
 | `embed`      | Arc qwen3-embedding     | nomic        | RAG                                  |
 | `embed-npu`  | NPU qwen3-embedding int4 | —           | RAG que libera la iGPU (ver nota de pooling) |
 | `embed-vision` | Hailo-8L CLIP ResNet-50x4 | —        | embeddings de IMAGEN (640 d) en el Pi5 .80 |
@@ -250,3 +259,206 @@ chat.context_compaction.prompt_template       = ""
   enteros. Es lo que evita prompts de 29k tokens (~45 s de prefill).
 - Verificar que la app lo cargó (no solo la BD): `GET /api/v1/configs/export` con JWT
   admin devuelve `chat.context_compaction.*` con las claves planas y puntos.
+
+## Contexto 64k y el 400 que tumbaba los chats largos (2026-11-08)
+
+Sintoma: al enviar en un chat antiguo, la UI devolvia error y el log de llama-swap
+registraba `status=400`:
+
+```
+request (48912 tokens) exceeds the available context size (32768 tokens), try increasing it
+type: exceed_context_size_error
+```
+
+Causa: `chat`/`deep` corrian con `--ctx-size 32768` y habia chats de 294 kB de JSON
+(~46-49k tokens). Open WebUI **no trunca el historial** (no existe `context_length`
+ni `prompt_token_limit` en su backend), y su compactacion tampoco puede rescatar un
+chat que ya excede el ctx: `_generate_summary` mete `COMPACTED_MESSAGES` entero en el
+prompt, asi que el propio resumen vuelve a dar 400. El `except` del emisor propaga el
+fallo y la peticion muere.
+
+Arreglo aplicado en `~/.config/llama-swap/config.yaml` (35B):
+
+```
+--ctx-size 65536 --parallel 4 --kv-unified --cache-type-k q8_0 --cache-type-v q8_0 -fa on
+```
+
+Coste medido: **+244 MiB de VRAM** (24.454 -> 24.698 MiB con el modelo cargado). El KV
+en q8 ocupa lo mismo con 64k que en fp16 con 32k. Carga en frio 10,7 s, pico 24.786 MiB
+de 32.768. LiteLLM pasa a declarar `max_input_tokens: 65536` (lo deriva de
+`context_length` de llama-swap, hay que **reiniciar litellm** para que lo relea).
+
+Pruebas:
+
+| prueba | antes | despues |
+|---|---|---|
+| 46.412 tok directo a llama-swap | 400 | 200 en 74,3 s (prefill frio) |
+| 46.416 tok via Open WebUI (`/api/chat/completions`) | 400 | 200 en 1,6 s (prefijo caliente) |
+
+Chats existentes rescatados con el endpoint nativo (no hace falta tocar la BD a mano):
+
+```
+POST /api/v1/chats/<id>/compact   {"model":"mesh.chat"}   # JWT del dueno del chat
+```
+
+- `Ataxia Congenita Revision`: 46k -> 10.750 tok (45% del umbral).
+- `Document Improvement`: 6.855 tok (29%).
+
+Devuelve `context_usage` con `tokens`, `threshold` y `percent`; el resumen se guarda
+como `contextSummary` en el mensaje checkpoint (`chat_message.context_summary`), y a
+partir de ahi cada envio solo manda resumen + cola reciente.
+
+Ojo con el 500 "Open WebUI: Server Connection Error" (`Connect call failed
+('172.18.0.5', 4000)`): no es la V100, es LiteLLM reiniciandose en ese instante. Se
+resuelve solo en ~10 s; no requiere tocar nada.
+
+## LM Studio como único motor (2026-11-08)
+
+- **llama-swap eliminado**: binario (`~/.local/bin/llama-swap`), unit systemd y `~/.config/llama-swap/` borrados. Copia en `~/.hermes/cache/scratch/llama-swap-backup/` (referencia de flags).
+- **LM Studio `:1234` es el único backend de la V100**. Carga: `lms load qwen3.6-35b-a3b-mtp --gpu max -c 65536 --parallel 4 --speculative-draft-mtp --speculative-draft-max-tokens 2 --identifier qwen3.6-35b-a3b-mtp --ttl 86400 -y`. VRAM 25.174-25.238 MiB, carga 10-11 s.
+- **La CLI no persiste la config por modelo**: si el JIT recarga el modelo, vuelve a **8192** de contexto. Por eso `~/.local/bin/mesh-load-35b.sh` + `~/.config/autostart/mesh-load-35b.desktop` (reintenta, fija `LMS_SERVER_HOST=0.0.0.0` y carga con ctx 64k).
+- **El servidor de LM Studio vuelve a `127.0.0.1` al reiniciarse**: con ese bind los contenedores NO llegan (`host.docker.internal`) y todo cuelga hasta el timeout (90 s). El `.desktop` de LM Studio lleva ahora `Exec=env LMS_SERVER_HOST=0.0.0.0 ...`; verificar con `ss -ltnp | grep :1234`.
+- **LiteLLM `:4000` sigue siendo el único punto de entrada** (LiteLLM → `host.docker.internal:1234/v1`). `extra_body: {reasoning_effort: none}` porque LM Studio ignora `chat_template_kwargs.enable_thinking` y `/no_think`.
+- **`.105` canalizado por el enrutador**: `wp-editorial_reviewer` y `wp-translator_translator` con `LLM_API_URL=http://192.168.0.100:4000/v1`, `LLM_MODEL=chat`, `LLM_API_KEY`, imágenes `:lmstudio` (Authorization condicional + `reasoning_effort: none` en el payload). YAML sincronizados.
+- Medido: `.105` → `:4000` → `:1234` = **0,5 s** (antes del arreglo del bind: timeout de 90 s).
+
+## Motor único `ninfer` + delegación por capacidad (2026-11-09)
+
+### Arranque del motor (V100)
+
+`ninfer-serve` corre **dentro** del contenedor `ninfer-serve`, cuyo CMD es
+`sleep infinity`: `docker restart ninfer-serve` NO levanta el motor. Relanzar a mano:
+
+```
+docker exec -d ninfer-serve sh -c 'setsid /src/build-v100/apps/ninfer-serve \
+  /models/qwen3_6_35b_a3b_v2.ninfer --host 0.0.0.0 --port 8090 \
+  --max-context 262144 --max-concurrency 2 --default-max-tokens 8192 \
+  --spec mtp --draft-tokens 2 > /tmp/serve.log 2>&1 < /dev/null'
+```
+
+- `--host 0.0.0.0` es obligatorio: por defecto escucha en 127.0.0.1 y LiteLLM
+  (contenedor) no lo alcanza.
+- Estado real: `docker exec ninfer-serve tail -5 /tmp/serve.log` → `engine ready`,
+  `max_model_len 262144`, KV 262.144 tok bf16 / 2 carriles, 28,4/32,8 GB de VRAM.
+- Nunca `docker exec ... pkill -f ninfer-serve`: el patrón coincide con el propio
+  `bash -c` del exec y mata también el exec. Usar
+  `pgrep -f '^/src/build-v100/apps/ninfer-serve'` + `kill`.
+- Coste del contexto: 70k de prompt = 3m35s de TTFT (325 t/s de prefill);
+  200k ≈ 10 min. El prefijo cacheado hace que el turno siguiente sea casi gratis.
+
+### LiteLLM (`:4000`)
+
+- Todos los alias de texto → `http://host.docker.internal:8090/v1`, modelo
+  `openai/qwen3.6-35b-a3b`, `max_parallel_requests: 2` (el motor tiene 2 carriles),
+  `model_info: {context_length: 262144, max_input_tokens: 253952, max_output_tokens: 8192}`.
+- `router_settings.allowed_fails: 5`, `cooldown_time: 30`: con `allowed_fails: 1` un
+  400 puntual (prompt gigante) sacaba `ninfer` de rotación 60 s y **todo** devolvía
+  429 «No deployments available».
+- `fallbacks`: `ninfer/chat/deep/lms27 → [arc]`, `fast/worker-big → [worker]`,
+  `worker → [arc]`. El respaldo real es la iGPU: no hay un segundo motor V100.
+- Verificar: `for m in ninfer chat deep fast lms27 worker-big; do curl -s :4000/v1/chat/completions -d '{"model":"'$m'",...}'; done`.
+
+### Open WebUI (`:3000` en el host → `:8080` en el contenedor)
+
+- **Modelo por defecto**: `ui.default_models = ["ninfer-malla"]` (preset creado por API).
+- Preset `ninfer-malla` («ninfer + malla», `base_model_id: mesh.ninfer`) con
+  `meta.toolIds: ["mesh_delegate"]`: chat sobre la V100 con la herramienta de
+  delegación ya enchufada. Cambiar el default en caliente requiere tocar
+  `webui.db` (`config` → `ui.default_models`) + `docker restart open-webui`.
+- `chat.context_compaction.token_threshold`: 24000 → **180000** (el ctx real ya no es
+  32k). El resumen lo hace `mesh.chat`, que es el propio ninfer.
+- `task.model.default = "mesh.arc"`: títulos/tags/follow-up se generan en la iGPU.
+- La UI **no** está en `:8080` del host: `docker port open-webui` → `3000`.
+
+### La herramienta `mesh_delegate`
+
+Fuente versionada: `openwebui/tools/mesh_delegate.py` (registrada en OWUI como tool
+`mesh_delegate`, id del mismo nombre). Una sola función `delegate(capability, task,
+attachments)`:
+
+| capability   | va a                          | medido                                        |
+|--------------|-------------------------------|-----------------------------------------------|
+| `openvino`   | `worker` (Arc Qwen3-30B)      | clasificación clínica en 1,9 s                |
+| `ocr`        | `ocr` (Hailo-8L)              | «FACTURA 2026-0042 total 199» de un PNG       |
+| `embed_text` | `embed-npu` (NPU, 1024 d)     | cos 0,71 visa ↔ tarjeta vs 0,58 vuelo         |
+| `embed_image`| `embed-vision` (Hailo, 640 d) | cos 0,99 imagen casi igual vs 0,71 distinta   |
+| `fanout`     | `mesh-orchestrator /v1/fanout`| 3 documentos → 3 subagentes (2 s c/u) + síntesis del planificador `arc` |
+| `status`     | `/v1/queue`                   | carriles ocupados / caídos                    |
+
+Flujo real en la UI (chat «Text Classification»): ninfer pidió `delegate(openvino)`,
+la UI lo ejecutó (1,9 s), devolvió «Clasificación: Síntoma cardíaco sospechoso de
+infarto agudo de miocardio» y ninfer lo redactó. El bucle de tool-calling lo hace el
+backend de Open WebUI (`process_chat_response`), no el modelo.
+
+### Trampas nuevas
+
+- **Los valves de una tool pisan `__init__`**: OWUI aplica los valves guardados en la
+  BD *después* de instanciar la clase. Guardar `api_key` en el valve lo deja vacío y
+  todas las delegaciones fallan con `LocalProtocolError: Illegal header value b'Bearer '`
+  (o `400 No connected db`). La clave se lee **en cada llamada** del entorno del
+  contenedor (`OPENAI_API_KEYS`) y el valve solo la sobrescribe si trae valor.
+- **`POST /api/chat/completions` NO ejecuta las tools**: devuelve el `tool_calls` y
+  termina (`finish_reason: "tool_calls"`). El bucle de ejecución + segunda pasada vive
+  en la UI y necesita `chat_id`/`session_id`. Para probar de verdad: navegador o la UI.
+- La tool necesita `tool_ids` en el body si se prueba por API; con el preset ya vienen
+  en `meta.toolIds`.
+- `chat.tool_permissions.enable = false` (sin aprobación manual) es lo que permite que
+  las delegaciones se ejecuten solas.
+- OWUI manda **41 tools** por turno (MCP searxng + builtins): ~8,1k tokens de prompt
+  fijos en cada petición. Con 262k de contexto es irrelevante, pero encarece el prefill
+  en frío.
+
+## Modelos de ninfer: catálogo, cambio y ampliación (2026-11-09)
+
+NInfer **no carga GGUF**: sirve artefactos `.ninfer` (pesos + tokenizer + chat template +
+recursos del frontend de visión en un solo fichero). Un proceso = un modelo residente.
+
+### Catálogo oficial (todos incluyen torre de visión registrada)
+
+| artefacto | peso | fichero | notas |
+|---|---:|---:|---|
+| `qwen3_6_35b_a3b_v2.ninfer` | 35B MoE (3B act.) | 22,78 GB | el que corre ahora, 139 tok/s decode |
+| `qwen3_6_35b_a3b.ninfer` | 35B MoE | 22,79 GB | **v3, no cargable** en este fork (lee v2) |
+| `qwen3_6_27b.ninfer` | 27B denso int | 17,50 GB | 54 tok/s |
+| `qwen3_6_27b_nvfp4.ninfer` | 27B NVFP4 | 18,32 GB | 55 tok/s |
+| `qwen3_8_27b.ninfer` | 27B denso int | 20,44 GB | 131 tok/s |
+| `qwen3_8_27b_nvfp4.ninfer` | 27B NVFP4 | 23,72 GB | **219 tok/s** (el más rápido), 99% aceptación MTP |
+
+Descarga: `hf download neroued/<Modelo>-NInfer <fichero>.ninfer --local-dir ~/workspace/ninfer-v100/models`
+(el manifiesto con sha256 está en `model-cards/<Modelo>-NInfer/artifact-manifest.json` dentro de `/src`).
+
+### Cambiar de modelo
+
+```
+~/produccion/ia-services-stack/ninfer-serve.sh qwen3_8_27b.nvfp4.ninfer 262144 2
+```
+
+El script mata el proceso y relanza con los flags de producción (incluido `--vision`).
+LiteLLM **no se toca**: mismo puerto :8090 y mismo model id, así que todos los alias siguen
+funcionando. Sí hay que ajustar `model_info.context_length` si el artefacto no aguanta 262k.
+Un `docker restart ninfer-serve` deja el puerto cerrado: el CMD del contenedor es `sleep infinity`.
+
+### Añadir modelos nuevos
+
+`/src/tools/convert` trae un conversor por familia: `qwen3_6`, `qwen3_6_27b`,
+`qwen3_6_35b_a3b`, `qwen3_8_27b`. Convierte un checkpoint HF a `.ninfer` con el layout y la
+cuantización que espera el runtime (groupwise-int / nvfp4). Es decir:
+
+- Mismo modelo, otra cuantización o revisión → sí, es el camino (`tools/convert` + `artifact`).
+- Otra familia (Llama, Mistral, Gemma, un VLM de terceros) → no hay conversor: exige kernels y
+  registro de arquitectura en C++ (el README lo dice: "the runtime is intentionally narrow").
+
+### Visión (imágenes y vídeo)
+
+El artefacto del 35B-A3B **ya trae** la torre de visión; solo estaba apagada. Con `--vision`:
+
+- Acepta `image_url` y `video_url` (HTTP(S), data URI o ruta local) en Chat Completions/Responses.
+- Coste medido: +330 MiB de VRAM (28.446 → 28.776 MiB usados) y `free` baja de 3,96 a 3,63 GiB.
+- Una petición con imagen se limita a `min(--max-context, 32768)` tokens de contexto.
+- `--media-cache-mib 1024` (caché LRU de payloads ya decodificados) y `--media-live-mib 2048`
+  (BF16 de parches vivos); 16 workers de preproceso.
+- Probado: «FACTURA 2026-0042 / total 199 EUR» de un PNG por `model=vision` y `model=ninfer`,
+  0,2-0,9 s, 89-144 tokens de prompt.
+
+Con esto la malla ya no necesita un VLM aparte: no cabe otro modelo en la V100 (quedan 3,6 GiB)
+y el 35B ve imágenes sin ceder contexto ni carril.

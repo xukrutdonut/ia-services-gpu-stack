@@ -82,6 +82,65 @@ def _post(url: str, body: dict, timeout: float = 600.0):
         return json.loads(r.read().decode())
 
 
+# ─────────────── recuperacion ante GPU HANG (i915 / Level-Zero) ──────────────
+#
+# El iGPU (Intel Arc) puede colgarse a mitad de un request: el kernel registra
+# "i915 ... GPU HANG: ecode ..., in ovms", i915 resetea el contexto del GPU,
+# OVMS recibe el fallo de Level-Zero (clWaitForEvents -14) y su capa OpenCL
+# segfaultea -> el proceso muere y Docker lo reinicia (restart: unless-stopped).
+# El benchmark NO debe abortar por eso: se espera a que OVMS vuelva y se
+# reintenta UNA vez, dejando constancia del evento en el JSON/Markdown.
+
+_CRASH_MARKERS = (
+    "Connection refused", "Remote end closed", "RemoteDisconnected",
+    "Connection reset", "EOF occurred", "Bad Gateway", "502", "503",
+    "urlopen error", "timed out",
+)
+
+
+def endpoint_up(base: str, timeout: float = 8.0) -> bool:
+    try:
+        with urllib.request.urlopen(base + "/v1/models", timeout=timeout) as r:
+            json.loads(r.read().decode())
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def wait_until_up(base: str, timeout_s: float, label: str, log) -> bool:
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < timeout_s:
+        if endpoint_up(base):
+            log(f"    [~] {label}: endpoint recuperado tras "
+                f"{time.perf_counter() - t0:.0f}s")
+            return True
+        time.sleep(3)
+    log(f"    [!] {label}: endpoint NO volvio en {timeout_s:.0f}s")
+    return False
+
+
+def looks_like_crash(res: dict) -> bool:
+    """El error de conexion/timeout delata un servidor muerto, no un 400."""
+    err = str(res.get("error", ""))
+    return bool(err) and any(mk in err for mk in _CRASH_MARKERS)
+
+
+def run_resilient(fn, base: str, label: str, log, wait_s: float = 900.0) -> dict:
+    """Ejecuta fn(); si el endpoint se cae a mitad (GPU HANG -> OVMS muere),
+    espera a que el contenedor se reinicie y reintenta UNA vez."""
+    res = fn()
+    if looks_like_crash(res):
+        log(f"    [!] {label}: endpoint caido ({str(res.get('error'))[:120]}) "
+            f"-> esperando reinicio del contenedor ...")
+        if wait_until_up(base, wait_s, label, log):
+            res2 = fn()
+            res2["recovered_after_crash"] = True
+            res2["first_error"] = res.get("error")
+            return res2
+        res["endpoint_down"] = True
+    return res
+
+
 def stream_chat(base: str, model: str, body_extra: dict, max_tokens: int,
                 timeout: float = 600.0):
     """Genera en streaming y devuelve metricas de latencia/velocidad."""
@@ -219,7 +278,7 @@ def shell(cmd: str) -> str:
 
 
 def gpu_state() -> dict:
-    st = {
+    st: dict = {
         "hostname": shell("hostname"),
         "date": _dt.datetime.now().isoformat(timespec="seconds"),
         "rx480_vram_used_mib": None,
@@ -239,8 +298,9 @@ def gpu_state() -> dict:
 def kernel_events() -> list[str]:
     out = shell(
         "journalctl -k -b --no-pager 2>/dev/null | "
-        "grep -E 'ring .* timeout|PRT request|GPU reset|gfxhub.*[Pp]age fault|failed ret is 65535' "
-        "| tail -20"
+        "grep -E 'ring .* timeout|PRT request|GPU reset|gfxhub.*[Pp]age fault"
+        "|failed ret is 65535|GPU HANG|context reset|i915.*reset|i915.*Error"
+        "|ovms.*segfault' | tail -30"
     )
     return [ln for ln in out.splitlines() if ln.strip()]
 
@@ -297,6 +357,8 @@ def bench_concurrency(base: str, model: str, extra_fn) -> dict:
             })
         except Exception as exc:  # noqa: BLE001
             out["levels"].append({"n": n, "error": str(exc)})
+            out["status"] = "fail"
+            out["error"] = str(exc)
             break
     if out["levels"] and out["levels"][0].get("aggregate_tps"):
         base_tps = out["levels"][0]["aggregate_tps"]
@@ -359,10 +421,14 @@ def render(data: dict) -> str:
         rows = []
         for m in data["chat"][key]:
             if m.get("status") not in ("ok",) and "ttft_s" not in m:
-                rows.append([m["model"], m.get("error", m["status"]), "-", "-", "-", "-", "-"])
+                tag = " (endpoint caido)" if m.get("endpoint_down") else (
+                    " (tras reinicio de OVMS)" if m.get("recovered_after_crash") else "")
+                rows.append([m["model"] + tag, m.get("error", m["status"]),
+                             "-", "-", "-", "-", "-"])
                 continue
             rows.append([
-                m["model"],
+                m["model"] + (" (tras reinicio de OVMS)"
+                              if m.get("recovered_after_crash") else ""),
                 m.get("prompt_tokens"),
                 f'{m["ttft_s"]:.3f}' if m.get("ttft_s") is not None else None,
                 f'{m["decode_tps"]:.1f}' if m.get("decode_tps") is not None else None,
@@ -413,7 +479,7 @@ def render(data: dict) -> str:
     L.append("")
     L.append(f"- VRAM usada: {data['post_gpu']['rx480_vram_used_mib']} MiB")
     L.append(f"- sclk: `{data['post_gpu']['rx480_sclk']}`")
-    L.append(f"- Eventos de kernel nuevos (ring timeout / PRT / reset): "
+    L.append(f"- Eventos de kernel nuevos (ring timeout / PRT / reset / GPU HANG i915): "
              f"{len(data['kernel_new'])}")
     for ln in data["kernel_new"]:
         L.append(f"    - `{ln}`")
@@ -448,18 +514,27 @@ def main() -> int:
         print(msg, flush=True)
 
     if args.only in ("arc", "both"):
-        log("== Intel Arc (OVMS :8006) — chat ==")
+        # Nota: OVMS (Arc) es el unico backend con restart: unless-stopped, asi
+        # que ante un GPU HANG el contenedor vuelve solo -> se espera y reintenta.
+        log(f"== Intel Arc (OVMS :8006) — chat ==  "
+            f"[endpoint {'UP' if endpoint_up(ARC_URL) else 'DOWN'}]")
         for m in ARC_CHAT:
             log(f"  {m} ...")
-            data["chat"]["arc"].append(bench_chat(ARC_URL, m, arc_extra, args.reps, args.max_tokens))
+            data["chat"]["arc"].append(run_resilient(
+                lambda m=m: bench_chat(ARC_URL, m, arc_extra, args.reps, args.max_tokens),
+                ARC_URL, f"chat {m}", log))
         if not args.no_concurrency:
             for m in ARC_CHAT:
                 log(f"  concurrencia {m} ...")
-                data["concurrency"]["arc"].append(bench_concurrency(ARC_URL, m, arc_extra))
+                data["concurrency"]["arc"].append(run_resilient(
+                    lambda m=m: bench_concurrency(ARC_URL, m, arc_extra),
+                    ARC_URL, f"concurrencia {m}", log))
         log("== Intel Arc — embeddings ==")
         for m in ARC_EMB:
             log(f"  {m} ...")
-            data["emb"]["arc"].append(bench_emb(ARC_URL, m, args.reps))
+            data["emb"]["arc"].append(run_resilient(
+                lambda m=m: bench_emb(ARC_URL, m, args.reps),
+                ARC_URL, f"emb {m}", log))
 
     if args.only in ("rx", "both"):
         log("== AMD RX480 (LM Studio :1235) — chat ==")

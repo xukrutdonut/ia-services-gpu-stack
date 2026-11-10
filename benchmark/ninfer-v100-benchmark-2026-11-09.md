@@ -30,6 +30,27 @@ corpus sintético que publican los READMEs (`218 tok/s` de https://github.com/ge
 es ceiling de continuación determinista; ver Reddit r/LocalLLM 1wdn4om, donde el propio autor
 publica sweep honesto: 67.7 tok/s MTP K=3 en contexto 2K — coincide con nuestra medición de 68.1).
 
+## Fork JimmyMax — offload de expertos a host RAM (2026-11-10)
+
+Probado `JimmyMax/ninfer-v100` (compilado sm_70 con CUDA 12.8, imagen `ninfer-jimmy:bench`,
+fuentes en `~/workspace/ninfer-jimmy`, desechable). Artefacto Q2_0 39 GiB + tabla n-gram 27 GiB
+(HF `WaveCut/Qwen3.8-Flash-Next-*Q2_0*` y `*ngram-table*`, sha256 verificados).
+
+| Config Q2_0 (--expert-residency host, int8 KV, MTP 3, ctx 8192) | decode |
+|---|---|
+| CLI disparo frío | 18.4 tok/s (caché 86.8% hits, transfers 28 GB) |
+| serve, petición tibia | 58.8 |
+| serve, petición estable | **65.6 tok/s** (TTFT 42 ms, prefill 122) |
+
+1. El offload funciona y reproducimos su cifra publicada (69.6 en corpus de código).
+2. **No sustituye a Strata** (IQ3_S 3.5 bits, 32K ctx, 99.5% hits: 54.7 sostenido / 81 ráfaga):
+   mismo partido, peor cuantización (2.4 bits), y no permite "ambos mundos" — la RAM solo
+   aloja una pila de expertos (~65 GB de 91) y la VRAM no da para 35B (29 GB) + caché de
+   expertos (25.3 GB). Siempre toca alternar.
+3. La carga inicial desde el disco SATA va a ~370 MB/s (1m43); primer turno siempre ~6-19 tok/s
+   por los misses fríos.
+4. Desechable: `rm -rf ~/workspace/ninfer-jimmy` libera ~66 GB (y `docker rmi ninfer-jimmy:bench`).
+
 ## Conclusiones
 
 1. **35B-A3B gana en todo**: 135-146 tok/s decode vs 68 máximo del 27B. Producción = 35B.

@@ -41,7 +41,7 @@ MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "10"))
 
 # Lista de servidores MCP (nombre => SSE URL)
 MCP_SERVERS: dict[str, str] = {
-    "openterminal-mcp": os.getenv("MCP_SSE_URL", "http://localhost:8003/sse"),
+    "openterminal-mcp": os.getenv("MCP_SSE_URL", "http://localhost:8004/sse"),
     "searxng-mcp": os.getenv("SEARXNG_SSE_URL", "http://localhost:8092/sse"),
     "nano-fs-tools-mcp": os.getenv("NANO_FS_SSE_URL", "http://localhost:8096/sse"),
 }

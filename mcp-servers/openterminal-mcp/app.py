@@ -184,4 +184,14 @@ def terminal_search_files(path: str = "/workspace", pattern: str = "*") -> list:
         return [f"Error searching files: {e}"]
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=8003)
+    import os as _os
+    # MCP_TRANSPORT=sse (default, backwards compatible) | http (streamable HTTP en /mcp) | stdio
+    _transport = _os.environ.get("MCP_TRANSPORT", "sse")
+    if _transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(
+            transport=_transport,
+            host=_os.environ.get("MCP_HOST", "0.0.0.0"),
+            port=int(_os.environ.get("MCP_PORT", "8004")),
+        )
