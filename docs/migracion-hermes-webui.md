@@ -103,40 +103,33 @@ fijado. No son necesarios comandos manuales dentro de los contenedores. Si cambi
 configuración de Compose, Compose puede recrear el contenedor afectado; el init es
 un recurso one-shot y no una segunda interfaz.
 
-## Migración desde `../hermes-webui` sin perder datos
+## Migración desde `../hermes-webui` (completada el 2026-11-11)
 
-Al 2026-11-11 la instancia activa todavía pertenece a `../hermes-webui`, utiliza la
-misma ruta de home/workspace y el puerto 8787. No se cortó durante la validación
-porque ejecuta las tareas actuales. El cambio de propietario es una ventana breve y
-controlada; no deben coexistir ambas sobre el mismo home/puerto.
+El Compose independiente `../hermes-webui` ya no existe: su contenedor se eliminó
+sin `-v` (los datos viven en `~/.hermes`, no en el contenedor) y la carpeta se
+borró. La única instancia es `hermes-webui` de este Compose, en `127.0.0.1:8787`,
+sana y con `hermes-agent-init` en `Exited (0)`.
 
-1. Esperar a que no haya conversaciones/runs activos y guardar una copia privada de
-   `config.yaml` y del estado importante. No copiar secretos al repositorio.
-2. Revisar el Compose antiguo y trasladar **solo** ajustes deseados: el antiguo
-   publica en `0.0.0.0`; el nuevo usa loopback salvo que se configure lo contrario.
-   Mantener una contraseña si el servicio es accesible desde LAN. Los binds nuevos
-   ya coinciden con el home y workspace existentes; no copiar una configuración de
-   ejemplo encima de la real.
-3. Desde el Compose antiguo, detener únicamente esa interfaz y eliminar su
-   contenedor, **sin `-v`**:
+Cambios aplicados al traspasar el servicio:
 
-   ```bash
-   docker compose -f ../hermes-webui/docker-compose.yml down
-   ```
+- Del Compose antiguo solo se conservaron los binds ya existentes del home y el
+  workspace; el antiguo publicaba en `0.0.0.0` y el nuevo escucha en loopback salvo
+  que `HERMES_WEBUI_HOST` diga lo contrario. Si se abre a la LAN, poner
+  `HERMES_WEBUI_PASSWORD`.
+- No se copió ninguna configuración de ejemplo encima de `~/.hermes/config.yaml`.
+- El primer init descargó el checkout fijado en el volumen `hermes-agent-src`; los
+  arranques siguientes no vuelven a clonar.
+- No se migra ni convierte el historial de OpenWebUI: es un producto distinto.
 
-4. Inmediatamente, desde la raíz nueva:
+Nunca deben coexistir dos interfaces sobre el mismo home y puerto. Para verificar
+tras un cambio:
 
-   ```bash
-   docker compose config -q
-   docker compose up -d hermes-webui
-   docker compose ps -a hermes-agent-init hermes-webui
-   curl --noproxy '*' -fsS http://127.0.0.1:8787/health
-   ```
-
-5. Autenticarse en la UI si procede; comprobar onboarding, los modelos y una
-   conversación real. El primer init descarga el checkout en un volumen nuevo y la
-   instalación de dependencias puede prolongar esta ventana. No se migra ni convierte
-   el historial de OpenWebUI: es un producto distinto.
+```bash
+docker compose config -q
+docker compose up -d hermes-webui
+docker compose ps -a hermes-agent-init hermes-webui
+curl --noproxy '*' -fsS http://127.0.0.1:8787/health
+```
 
    Antes de cualquier ensayo paralelo, recordar que las variables Compose exportadas
    en el shell prevalecen sobre `.env`: fijar home/workspace inline y revisar los

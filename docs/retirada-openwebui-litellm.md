@@ -28,16 +28,16 @@
   coordinado. Su instancia activa independiente no se reinició; la migración del
   arranque completo corresponde a t_37849dc3. [Evidencias](../hermes-webui/VERIFICATION.md).
 
-Se conservan Open Terminal, búsqueda/MCP, OVMS, orquestador y sus datos. La imagen
+Se conservan Open Terminal, búsqueda/MCP, OVMS y sus datos. La imagen
 Open Terminal procede de `ghcr.io/open-webui/open-terminal`: es otro producto,
 no el servidor OpenWebUI. Su paquete Python `litellm` es un SDK compartido del
 entorno de programación; no inicia ni conecta por sí mismo al gateway retirado.
 No se elimina ni se reconstruye esta herramienta compartida innecesariamente.
 
 El fichero local **no versionado** `openwebui/tools/pubmed_medical_deep_research.py`
-preexistía y no se ha borrado ni incluido en el commit. Es una herramienta manual
-para la aplicación retirada, no un servicio/mount/script del arranque actual.
-Conservarlo como material del usuario no lo convierte en integración activa.
+era una herramienta manual para la aplicación retirada. Se borró junto con el
+directorio `openwebui/` el 2026-11-11, al podar el stack; nunca fue un
+servicio/mount/script del arranque.
 La documentación previa está en `docs/history/`, marcada no operativa; no ejecutar
 sus comandos. Los benchmarks describen entornos pasados, no proveedores actuales.
 
@@ -68,8 +68,12 @@ La validación completa se finalizó en t_37849dc3: 15 pruebas unitarias/regresi
 arranque limpio y segundo arranque del grafo aislado, modelo/completion acotados,
 ausencia de contenedores legacy y limpieza exclusiva del trial. Detalles en
 [VERIFICATION.md](../hermes-webui/VERIFICATION.md). El corte de la instancia activa
-no se ejecutó mientras sostiene al worker; el procedimiento y rollback están en la
+se ejecutó después del 2026-11-11: `hermes-webui` de este Compose es ya la única
+interfaz y la carpeta `../hermes-webui` se eliminó. Ver la
 [guía operativa](migracion-hermes-webui.md).
+
+Posteriormente se retiró también `mesh-orchestrator` (:4010): ningún cliente lo
+usaba. El detalle está en el commit `93231fa` del repositorio.
 
 ## Limpieza opcional de datos (NO ejecutada)
 
