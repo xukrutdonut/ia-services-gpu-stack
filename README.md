@@ -49,7 +49,9 @@ gateway intermedio. El backend se configura en el home de Hermes. No arrancar do
 interfaces sobre el mismo puerto/home.
 
 **Inferencia:** [MESH.md](MESH.md) describe las conexiones directas y los IDs
-reales de modelo. Hailo y la NPU son externos; ninfer sí lo levanta este Compose
+reales de modelo. Para usar Hermes contra la V100 hay un perfil dedicado con el
+prompt recortado (60 % menos tokens por turno) y el preset de arranque del motor:
+[perfil v100](docs/perfil-v100-hermes.md). Hailo y la NPU son externos; ninfer sí lo levanta este Compose
 (`ninfer-server`, perfil `ninfer` porque la V100 es una eGPU que no siempre está
 enumerada), aunque su motor se arranca aparte con `./ninfer-serve.sh`.
 No hay orquestador ni gateway intermedio: cada cliente apunta al proveedor.

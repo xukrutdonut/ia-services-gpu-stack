@@ -28,7 +28,9 @@ inferencia.
 montados en solo lectura). El motor **no** arranca solo; el contenedor es el
 runtime y `./ninfer-serve.sh [modelo] [ctx] [concurrencia] [draft]` lo lanza o
 relanza dentro con `docker exec`. model-id fijo `ninfer`; vision incluida con
-`--vision`. El motor ignora SIGTERM, por eso el script hace TERM → espera →
+`--vision`. Los defaults del script son el preset de máxima velocidad (ctx 32768,
+1 slot, draft 3) pensado para Hermes; con varios clientes, pasar `65536 2 3`. El
+detalle y la medición están en [perfil v100](docs/perfil-v100-hermes.md). El motor ignora SIGTERM, por eso el script hace TERM → espera →
 SIGKILL antes de relanzar.
 
 El servicio está en el perfil `ninfer` porque la V100 es una eGPU: cuando no está
