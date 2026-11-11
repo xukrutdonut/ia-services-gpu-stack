@@ -1,0 +1,17 @@
+# Copiar como config.yaml en HERMES_HOME solo si no hay configuración existente.
+# Sustituir default por un ID anunciado por GET /v1/models del proveedor.
+model:
+  provider: custom
+  base_url: http://127.0.0.1:8006/v1
+  default: Qwen3-30B-A3B-Instruct-2507-int4-ov
+terminal:
+  backend: local
+  cwd: /workspace
+# Opcional: servidores MCP publicados en el host (no obligatorios para chat).
+mcp_servers:
+  searxng:
+    url: http://127.0.0.1:8092/sse
+  fetch:
+    url: http://127.0.0.1:8095/sse
+  filesystem:
+    url: http://127.0.0.1:8096/sse

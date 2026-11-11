@@ -2,21 +2,64 @@ networks:
   ia-routing-stack:
     driver: bridge
 volumes:
+  hermes-agent-src: null
   openvino-models: null
   ov_cache: null
   lms-config: null
-  open-webui-data: null
   open-terminal-data: null
   mesh-orchestrator-data: null
 services:
+  # Hermes ejecuta el agente in-process; el init obtiene su código y submódulos.
+  hermes-agent-init:
+    image: ${HERMES_WEBUI_IMAGE:-ghcr.io/nesquena/hermes-webui:0.52.666}
+    entrypoint: ["/bin/bash", "/init-agent.sh"]
+    environment:
+      HERMES_AGENT_REF: ${HERMES_AGENT_REF:-0ea6ea941aee31b20fffeb6dfa0d0f29f4370e2e}
+      WANTED_UID: ${HERMES_UID:-1000}
+      WANTED_GID: ${HERMES_GID:-1000}
+    volumes:
+      - hermes-agent-src:/opt/hermes
+      - ./hermes-webui/init-agent.sh:/init-agent.sh:ro
+    restart: "no"
+
+  hermes-webui:
+    image: ${HERMES_WEBUI_IMAGE:-ghcr.io/nesquena/hermes-webui:0.52.666}
+    # Linux: localhost del agente alcanza los proveedores/MCP publicados en el host.
+    network_mode: host
+    depends_on:
+      hermes-agent-init:
+        condition: service_completed_successfully
+    environment:
+      HERMES_WEBUI_HOST: ${HERMES_WEBUI_HOST:-127.0.0.1}
+      HERMES_WEBUI_PORT: ${HERMES_WEBUI_PORT:-8787}
+      HERMES_WEBUI_STATE_DIR: /home/hermeswebui/.hermes/webui
+      HERMES_WEBUI_DEFAULT_WORKSPACE: /workspace
+      HERMES_WEBUI_PASSWORD: ${HERMES_WEBUI_PASSWORD:-}
+      HERMES_SKIP_CHMOD: "1"
+      WANTED_UID: ${HERMES_UID:-1000}
+      WANTED_GID: ${HERMES_GID:-1000}
+    volumes:
+      - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent:ro
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      # Conserva terminal.cwd y las rutas absolutas del CLI dentro del contenedor.
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:${HERMES_WORKSPACE:-${HOME}/workspace}
+    healthcheck:
+      test: ["CMD-SHELL", "curl --noproxy '*' -fsS http://127.0.0.1:$${HERMES_WEBUI_PORT}/health >/dev/null"]
+      interval: 30s
+      timeout: 8s
+      start_period: 300s
+      retries: 5
+    restart: unless-stopped
+
   # ==========================================
   # SECCIÓN MCP (Model Context Protocol Servers)
-  # Transporte: streamable-http (compatible nativo con Open WebUI >= 0.11)
+  # Transportes SSE y streamable-http para clientes MCP independientes.
   # ==========================================
 
-  # Open Terminal - servidor REST oficial de open-webui/open-terminal
-  # Integracion nativa en Open WebUI (Admin Settings -> Integrations -> Open Terminal)
-  # Da barra lateral con file browser, upload/download, editor y ejecucion de comandos
+  # Open Terminal - servidor REST y backend de ejecucion compartido.
+  # Es independiente del frontend retirado: lo conservan los agentes que usan su API.
+  # Da file browser, upload/download, editor y ejecucion de comandos.
   # Imagen propia: open-terminal/Dockerfile anade pip + toolchain de programacion/IA
   # sobre ghcr.io/open-webui/open-terminal:slim (que no trae pip a proposito).
   open-terminal:
@@ -97,8 +140,8 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
-  # Mismo servidor, transporte streamable-http (POST /mcp), que es el UNICO
-  # que entiende Open WebUI 0.13 (su cliente usa streamable_http_client, sin SSE).
+  # Mismo servidor con transporte streamable-http (POST /mcp), conservado para
+  # clientes MCP que no usan SSE. Es independiente del frontend retirado.
   searxng-mcp-http:
     build:
       context: ./mcp-servers/searxng-mcp
@@ -307,73 +350,12 @@ services:
         - node.hostname == khazad-dum
 
   # ==========================================
-  # MALLA DE INFERENCIA (2026-11-08)
-  # LiteLLM = unica puerta OpenAI-compatible. El nombre del modelo elige GPU:
-  #   chat -> Arc iGPU (OVMS) | deep/lms27/vision/worker-big -> V100 (llama-swap :8011) | worker -> Arc iGPU (paralelo barato)
-  # Cola: max_parallel_requests por backend (el resto espera) + rpm (429 al saturarse)
-  #       + cooldown/fallbacks (si un backend falla, entra el siguiente).
-  # Open WebUI = frontend de la malla (solo habla con LiteLLM).
-  # mesh-orchestrator = cola acotada por carril + subagentes (fan-out con planner).
+  # ORQUESTACION DE INFERENCIA
+  # mesh-orchestrator conserva la cola acotada por carril y el fan-out con planner.
+  # MODEL_ROUTES traduce cada alias publico a un proveedor OpenAI-compatible real:
+  #   chat/deep/lms27/worker-big/arc/worker/tiny -> OVMS en la iGPU
+  #   ocr -> Hailo-8L. No hay gateway intermedio ni credenciales sinteticas.
   # ==========================================
-
-  litellm:
-    image: ghcr.io/berriai/litellm:main-stable
-    container_name: litellm
-    restart: unless-stopped
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
-    ports:
-      - "4000:4000"
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    environment:
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-      - LITELLM_LOG=INFO
-      - STORE_MODEL_IN_DB=False
-      - TZ=Europe/Madrid
-    # llama-swap corre en el host (necesita la V100 por CUDA, que Docker no ve por CDI)
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: open-webui
-    restart: unless-stopped
-    ports:
-      - "3000:8080"
-    volumes:
-      - open-webui-data:/app/backend/data
-    # el motor ninfer (V100) vive en el host: sin esto host.docker.internal resuelve
-    # a 127.0.0.1 dentro del contenedor y la conexion se rechaza
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      # El selector de Open WebUI ve SOLO el motor ninfer: se conecta directo a :8090
-      # (id "ninfer", auth deshabilitada). Los alias de malla (arc, ocr, embed-*) viven
-      # en litellm:4000 y solo los usa la tool mesh_delegate, no el chat.
-      - OPENAI_API_BASE_URLS=http://host.docker.internal:8090/v1
-      - OPENAI_API_KEYS=${LITELLM_MASTER_KEY}
-      - ENABLE_OPENAI_API=true
-      - ENABLE_OLLAMA_API=false
-      - DEFAULT_MODELS=ninfer
-      - WEBUI_URL=http://192.168.0.100:3000
-      - WEBUI_SECRET_KEY=${OPENWEBUI_SECRET_KEY}
-      - ENABLE_SIGNUP=true
-      - ENABLE_PERSISTENT_CONFIG=true
-      - TZ=Europe/Madrid
-    depends_on:
-      - litellm
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
 
   mesh-orchestrator:
     build:
@@ -384,23 +366,22 @@ services:
     ports:
       - "4010:4010"
     environment:
-      - LITELLM_BASE=http://litellm:4000/v1
-      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - MODEL_ROUTES={"chat":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"deep":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"lms27":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"worker-big":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"arc":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"worker":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"tiny":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"ocr":{"base_url":"http://192.168.0.80:8089/v1","model":"ocr-hailo-8l"}}
       - MAX_QUEUE_PER_LANE=100
-      - LANE_CONCURRENCY={"chat":2,"deep":1,"lms27":1,"vision":1,"worker":4,"worker-big":2}
+      - LANE_CONCURRENCY={"chat":2,"deep":1,"lms27":1,"worker":4,"worker-big":2}
       - ALLOW_SHELL=0
       - TASK_TIMEOUT=900
       - DATA_DIR=/data
-      # sonda de salud: si el nodo esta caido, el carril se desvia sin esperar el timeout del gateway
+      # Sonda directa al proveedor. No hay fallback a otro alias del mismo motor.
       - LANE_HEALTH={"worker":"http://ia-gpu-intel-openvino:8000/v1/models"}
-      - LANE_FALLBACK={"worker":"chat"}
+      - LANE_FALLBACK={}
       - LANE_DOWN_TTL=60
       - LANE_HEALTH_TIMEOUT=3
       - TZ=Europe/Madrid
     volumes:
       - mesh-orchestrator-data:/data
     depends_on:
-      - litellm
+      - ia-gpu-intel-openvino
     networks:
       - ia-routing-stack
     deploy:

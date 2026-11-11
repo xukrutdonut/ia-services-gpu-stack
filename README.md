@@ -1,126 +1,73 @@
 # IA Services Stack
 
-Docker Swarm stack para servicios de IA en homelab con GPUs Intel Arc (Xe2 128EU iGPU) y AMD RX480 (Polaris Vulkan).
+Servicios de IA del homelab, gestionados con **Docker Compose v2 en Linux**.
+No desplegar este archivo con `docker stack deploy`: utiliza builds locales,
+dispositivos del host y un inicializador con condición de finalización.
 
 ## Servicios
 
-| Servicio | Puerto | Descripción |
-|---|---|---|
-| **ia-gpu-intel-openvino** | 8006 | Servidor OpenVINO GenAI (Intel Arc iGPU) compatible OpenAI API + panel admin en `/admin` |
-| **ia-gpu-amd-rx480** | 1235 | Nodo LM Studio (AMD RX480 Vulkan) aislado del host, con LMLink |
-| **open-webui** | 3000 | Frontend unificado para ambos backends GPU |
-| **searxng-mcp** | 8092 | MCP server: búsqueda web via SearXNG |
-| **openterminal-mcp** | 8003 | MCP server: terminal remoto |
-| **fetch-mcp** | 8095 | MCP server: fetch HTTP |
-| **nano-fs-tools-mcp** | 8096 | MCP server: filesystem + delegación IA a GPUs |
-| **zotero-mcp** | 8765 | MCP server: Zotero local |
-| **moodle-ia-mcp** | 8097 | MCP server: Moodle + IA |
-| **docker-agent** | — | CLI (profile `agent`): runner cagent con planificador/ejecutor. `docker compose run --rm docker-agent "pregunta"`. Código en `~/workspace/docker-agent` |
+| Servicio | Puerto del host | Función |
+|---|---:|---|
+| `hermes-webui` | 8787, loopback por defecto | Interfaz de Hermes; proveedor configurado en su home |
+| `hermes-agent-init` | — | Inicializa el agente y submódulos antes de la UI |
+| `ia-gpu-intel-openvino` | 8006 | OVMS: chat y embeddings compatibles OpenAI, `/v1/models` |
+| `mesh-orchestrator` | 4010 | Trabajos por lotes y fan-out sobre proveedores directos |
+| `open-terminal` | 8003 | API REST de herramientas, no MCP |
+| `searxng` | 8085 | Buscador compartido |
+| `searxng-mcp` / `searxng-mcp-http` | 8092 / 8093 | Adaptadores MCP de búsqueda |
+| `fetch-mcp` | 8095 | Fetch HTTP |
+| `nano-fs-tools-mcp` | 8096 | Filesystem y delegación |
+| `moodle-ia-mcp` | 8097 | Moodle; requiere token real |
+| `zotero-mcp` | 8765 | Opcional, perfil `zotero`, acceso al Zotero del host |
+| `docker-agent` | — | Runner opcional, perfil `agent`; código montado externamente |
 
-## Arquitectura GPU Dual
+La fuente de verdad de puertos, mounts y perfiles es `docker-compose.yml`.
+OpenWebUI y LiteLLM están retirados, no son requisitos del stack. Su volumen
+antiguo no se elimina: ver [migración y retirada opcional](docs/retirada-openwebui-litellm.md).
 
-```
-Host (khazad-dum)
-├── Intel Arc iGPU Xe2 128EU (PCI 00:02.0, renderD129)
-│   └── ia-gpu-intel-openvino (OpenVINO GenAI, Level-Zero, ipc:host)
-│       ├── API: http://localhost:8006/v1
-│       └── Admin: http://localhost:8006/admin
-│
-├── AMD RX480 8GB (PCI 01:00.0, renderD128)
-│   └── ia-gpu-amd-rx480 (LM Studio, Vulkan, namespace IPC propio)
-│       └── API: http://localhost:1235/v1
-│
-└── open-webui:3000 → une ambos backends OpenAI-compatible
-    ├── Backend 0: intel-arc (OpenVINO GenAI)
-    └── Backend 1: amd-rx480 (LM Studio)
-```
-
-Por qué contenedores separados (no fusionados):
-- Intel necesita `ipc: host` para Level-Zero shared memory
-- AMD necesita namespace IPC propio para aislar LM Studio del host
-- Stacks de drivers incompatibles (oneAPI/Level-Zero vs Mesa Vulkan/radeon)
-- Restart policies opuestas (`unless-stopped` vs `"no"` por ring timeouts Polaris)
-
-## Panel de Administración GPU
-
-El contenedor `ia-gpu-intel-openvino` expone un panel de gestión en:
-
-```
-http://localhost:8006/admin
-```
-
-Incluye:
-- Monitorización GPU Intel Arc vía sysfs (frecuencia, RC6, throttling)
-- Gestión de modelos (cargar/descargar/warmup/estado cache)
-- Info del sistema (RAM, disco, dispositivos, NPU)
-- Benchmark rápido
-- Tail de logs del servidor
-- SPA estilo LM Studio (dark/light theme, sidebar 280px)
-
-## Estructura
-
-```
-ia-services-stack/
-├── docker-compose.yml          # Stack principal (11 servicios)
-├── .env.example                # Template de variables (copiar a .env)
-├── ia-gpu-intel-openvino/      # Backend Intel Arc (OpenVINO GenAI)
-│   ├── Dockerfile
-│   ├── server.py               # API OpenAI-compatible + admin router
-│   ├── admin_dashboard.py      # Panel gestión GPU (/admin)
-│   ├── entrypoint.sh
-│   ├── convert_models.py       # Conversión HF -> OpenVINO IR
-│   └── convert_one.py
-├── ia-gpu-amd-rx480/           # Backend AMD RX480 (LM Studio Vulkan)
-│   ├── Dockerfile
-│   ├── entrypoint.sh
-│   ├── run_benchmark.py
-│   └── README.md               # Docs detalladas RX480 + benchmarks
-├── benchmark/                  # Benchmark dual-GPU unificado
-├── mcp-servers/                # 6 MCP servers
-├── lm-chat/                    # Chat ligero alternativo
-├── mcp-bridge/                 # Bridge MCP proxy
-├── comfyui/                    # ComfyUI Dockerfile
-├── searxng/                    # SearXNG config
-└── ssrf_proxy/                 # Proxy Squid anti-SSRF
-```
-
-## Despliegue
+## Inicio
 
 ```bash
-# 1. Configurar variables
+# Solo instalación nueva; NO sobrescribir un .env existente.
 cp .env.example .env
-# Editar .env con tus valores reales
-
-# 2. NPU drivers (necesario para ia-gpu-intel-openvino)
-# Obtener libs del snap intel-npu-driver:
-#   /snap/intel-npu-driver/current/usr/lib/x86_64-linux-gnu/
-# Copiar a ia-gpu-intel-openvino/npu-drivers/ antes del build
-
-# 3. Construir y desplegar
-docker compose build
-docker compose up -d
-
-# 4. Inicializar LM Studio en AMD (solo primera vez)
-docker volume create ia-services-stack_lms_amd_profile
-docker run --rm -it -v ia-services-stack_lms_amd_profile:/root/.lmstudio \
-  ia-gpu-amd-rx480:latest /root/.lmstudio/bin/lms login
+# Ajustar rutas, UID/GID y credenciales locales necesarias.
+docker compose config -q
+docker compose up -d --build
 ```
 
-## Optimizaciones OpenVINO (Intel Arc)
+Requisitos: Docker Engine/Compose v2, acceso a Internet para imágenes/fuentes,
+permisos sobre los binds del host y los dispositivos Intel del Compose. OVMS
+monta los modelos desde `${HOME}/modelos/openvino`; no los descarga este arranque.
+Open Terminal requiere `${HOME}/openproject/jobs` y conserva su volumen de datos.
+No usar `down -v` para mantenimiento.
 
-- `PERFORMANCE_HINT=LATENCY` — más rápido para single-request (+10% medido)
-- `KV_CACHE_PRECISION=f16` — mitiga el ancho de banda KV vs f32
-- `GPU_ENABLE_SDPA_OPTIMIZATION` — fused Scaled Dot Product Attention
-- `DYNAMIC_QUANTIZATION_GROUP_SIZE=32` — cuantización dinámica en grupos de 32
-- `CACHE_DIR=/tmp/ov_cache` — cache de compilación persistente (volumen `ov_cache`)
+**Hermes WebUI forma parte del Compose raíz** y se inicia con el mismo
+`docker compose up -d`: abre `http://127.0.0.1:8787`. El inicializador obtiene el
+agente y sus submódulos antes de arrancar la interfaz, sin Compose independiente
+ni gateway intermedio. Seguir [requisitos, configuración directa del modelo,
+persistencia y migración](hermes-webui/README.md). El backend se configura en el
+home de Hermes, no mediante una clave de gateway en el `.env` de Compose.
+No arrancar dos interfaces sobre el mismo puerto/home.
 
-## Rendimiento real
+**Inferencia:** [MESH.md](MESH.md) describe conexiones directas, modelos reales
+y API del orquestador. Hailo, NPU y ninfer son servicios externos, no levantados
+por este Compose. Los aliases del orquestador no son IDs del proveedor ni
+modelos para configurar en Hermes.
 
-| GPU | Modelo | tok/s |
-|---|---|---|
-| Intel Arc (OpenVINO) | Qwen3-30B-A3B (3.3B activos) | 21 |
-| Intel Arc (OpenVINO) | Dense 7B INT4 | 21 |
-| Intel Arc (OpenVINO) | Dense 3B INT4 | 35 |
-| AMD RX480 (Vulkan) | Llama 3.2 1B Q4_K_M | 94 |
-| AMD RX480 (Vulkan) | Qwen 2.5 3B Q4_K_M | 43 |
-| AMD RX480 (Vulkan) | Ministral 8B Q4_K_S | 21 |
+## Comprobaciones
+
+```bash
+docker compose --env-file .env.example config -q
+python3 -m unittest discover -s tests -v
+DATA_DIR="$PWD/.test-data" python3 -m unittest discover -s mesh-orchestrator -v
+python3 -m unittest discover -s hermes-webui -p 'test_*.py' -v
+curl --fail http://127.0.0.1:8006/v1/models
+curl --fail http://127.0.0.1:4010/healthz
+docker compose ps -a
+```
+
+Las pruebas del orquestador usan un proveedor HTTP local de prueba; no sustituyen
+una generación real en OVMS. `/healthz` indica salud local del orquestador, no
+que todos los proveedores estén listos. Los benchmarks en `benchmark/` y el
+[archivo de la malla anterior](docs/history/inference-before-hermes.md) son
+históricos, no instrucciones del despliegue actual.

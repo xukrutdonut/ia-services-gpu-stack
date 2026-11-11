@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mesh-orchestrator: cola acotada + subagentes sobre la malla LiteLLM.
+"""mesh-orchestrator: cola acotada + subagentes sobre proveedores OpenAI-compatible.
 
 Dos piezas:
 
@@ -22,15 +22,58 @@ import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-BASE = os.environ.get("LITELLM_BASE", "http://litellm:4000/v1")
-KEY = os.environ.get("LITELLM_MASTER_KEY", "sk-mesh")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+
+
+@dataclass(frozen=True)
+class ModelRoute:
+    base_url: str
+    model: str
+
+
+def parse_model_routes(raw: str) -> dict[str, ModelRoute]:
+    """Valida aliases públicos y sus destinos OpenAI-compatible."""
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("MODEL_ROUTES debe ser un objeto JSON")
+
+    routes = {}
+    for alias, config in data.items():
+        if not isinstance(config, dict):
+            raise ValueError(f"{alias}: la ruta debe ser un objeto JSON")
+        base_url = config.get("base_url", "").rstrip("/")
+        model = config.get("model", "")
+        parsed_url = urlparse(base_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError(f"{alias}: base_url debe ser una URL HTTP(S) absoluta")
+        if not isinstance(model, str) or not model:
+            raise ValueError(f"{alias}: model es obligatorio")
+        routes[alias] = ModelRoute(base_url=base_url, model=model)
+    return routes
+
+
+# Los aliases históricos del orquestador se conservan para sus clientes, pero ya no
+# representan despliegues de un gateway: cada uno apunta a un modelo real.
+DEFAULT_MODEL_ROUTES = {
+    alias: {
+        "base_url": "http://ia-gpu-intel-openvino:8000/v1",
+        "model": "Qwen3-30B-A3B-Instruct-2507-int4-ov",
+    }
+    for alias in ("chat", "deep", "lms27", "worker-big", "arc", "worker", "tiny")
+} | {
+    "ocr": {"base_url": "http://192.168.0.80:8089/v1", "model": "ocr-hailo-8l"},
+}
+MODEL_ROUTES = parse_model_routes(
+    os.environ.get("MODEL_ROUTES") or json.dumps(DEFAULT_MODEL_ROUTES)
+)
 MAX_QUEUE = int(os.environ.get("MAX_QUEUE_PER_LANE", "100"))
 CONCURRENCY = json.loads(os.environ.get("LANE_CONCURRENCY", '{"chat":2,"deep":1,"worker":4,"worker-big":2,"tiny":4}'))
 # Sonda de salud por carril: si el nodo que lo sirve esta caido, no esperamos al
@@ -141,8 +184,11 @@ async def resolve_model(model: str) -> str:
 
 async def call_llm(model: str, messages: list[dict], tools: list[dict] | None = None,
                    json_mode: bool = False, max_tokens: int = 1500) -> dict:
-    """Una llamada al gateway con admision de cola, sonda de salud y timeout."""
+    """Una llamada directa con admision de cola, sonda de salud y timeout."""
     model = await resolve_model(model)
+    route = MODEL_ROUTES.get(model)
+    if route is None:
+        raise HTTPException(400, f"modelo no configurado: {model}; disponibles: {sorted(MODEL_ROUTES)}")
     ln = lane(model)
     async with ln.lock:
         if ln.queued >= MAX_QUEUE:
@@ -158,7 +204,7 @@ async def call_llm(model: str, messages: list[dict], tools: list[dict] | None = 
                 ln.running += 1
             try:
                 body: dict[str, Any] = {
-                    "model": model,
+                    "model": route.model,
                     "messages": messages,
                     "temperature": 0.2,
                     "max_tokens": max_tokens,
@@ -169,8 +215,7 @@ async def call_llm(model: str, messages: list[dict], tools: list[dict] | None = 
                     body["tools"] = tools
                     body["tool_choice"] = "auto"
                 async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as c:
-                    r = await c.post(f"{BASE}/chat/completions", json=body,
-                                     headers={"Authorization": f"Bearer {KEY}"})
+                    r = await c.post(f"{route.base_url}/chat/completions", json=body)
                 if r.status_code >= 300:
                     raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
                 return r.json()
@@ -353,13 +398,13 @@ app = FastAPI(title="mesh-orchestrator", version="1.0", lifespan=lifespan)
 
 @app.get("/healthz")
 async def healthz() -> dict:
-    try:
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get(f"{BASE}/models", headers={"Authorization": f"Bearer {KEY}"})
-        gw = r.status_code == 200
-    except Exception:  # noqa: BLE001
-        gw = False
-    return {"ok": gw, "gateway": BASE, "allow_shell": ALLOW_SHELL, "lanes": [l.snapshot() for l in LANES.values()]}
+    """Salud local: la disponibilidad por carril se mide con LANE_HEALTH."""
+    return {
+        "ok": True,
+        "providers": sorted({route.base_url for route in MODEL_ROUTES.values()}),
+        "allow_shell": ALLOW_SHELL,
+        "lanes": [l.snapshot() for l in LANES.values()],
+    }
 
 
 @app.get("/v1/queue")

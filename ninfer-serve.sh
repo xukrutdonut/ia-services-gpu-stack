@@ -2,7 +2,7 @@
 # Relanza el motor ninfer de la V100 (contenedor ninfer-serve, CMD = sleep infinity).
 # Uso: ./ninfer-serve.sh [modelo.ninfer] [max-context] [concurrencia] [kv-dtype] [draft-tokens]
 #   kv-dtype: bf16 (defecto) | int8 | fp8 | nvfp4 | k8v4   (nvfp4/k8v4 no existen en Volta)
-# --model-id se fija a "ninfer": el id que ven LiteLLM y pi no cambia al cambiar de artefacto.
+# --model-id se fija a "ninfer": el id de los clientes directos no cambia al cambiar de artefacto.
 # --vision es OBLIGATORIO para imagenes/video: el artefacto lleva la torre de vision,
 # pero el runtime solo la carga con ese flag (~330 MiB de VRAM).
 set -eu
