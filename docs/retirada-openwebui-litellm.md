@@ -1,5 +1,9 @@
 # Retirada de OpenWebUI y LiteLLM — 2026-11-11
 
+> Registro de cambios y evidencias de la retirada. La instalación, configuración,
+> arranque, migración a Hermes y conservación de datos se han unificado en la
+> [guía operativa](migracion-hermes-webui.md).
+
 ## Cambios aplicados
 
 - Eliminados los dos servicios, `depends_on`, healthchecks, puertos y variables
@@ -60,8 +64,12 @@ apuntan a los servicios retirados; el DNS wildcard compartido se conserva.
 - Sin contenedores `open-webui`/`litellm`; volumen antiguo confirmado presente.
 - No unidades `.service` locales referenciando los nombres retirados.
 
-La validación completa desde instalación limpia y la migración de la instancia
-Hermes activa quedan en t_37849dc3; no se afirma haberlas realizado aquí.
+La validación completa se finalizó en t_37849dc3: 15 pruebas unitarias/regresivas,
+arranque limpio y segundo arranque del grafo aislado, modelo/completion acotados,
+ausencia de contenedores legacy y limpieza exclusiva del trial. Detalles en
+[VERIFICATION.md](../hermes-webui/VERIFICATION.md). El corte de la instancia activa
+no se ejecutó mientras sostiene al worker; el procedimiento y rollback están en la
+[guía operativa](migracion-hermes-webui.md).
 
 ## Limpieza opcional de datos (NO ejecutada)
 

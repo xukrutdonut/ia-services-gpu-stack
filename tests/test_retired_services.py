@@ -54,6 +54,38 @@ class RetiredServicesTest(unittest.TestCase):
             self.assertIn(volume, self.config["volumes"])
         self.assertNotIn("open-webui-data", self.config.get("volumes", {}))
 
+    def test_hermes_starts_agent_before_webui_without_optional_profiles(self):
+        webui = self.config["services"]["hermes-webui"]
+        initializer = self.config["services"]["hermes-agent-init"]
+        self.assertNotIn("profiles", webui)
+        self.assertNotIn("profiles", initializer)
+        self.assertEqual(
+            webui["depends_on"]["hermes-agent-init"]["condition"],
+            "service_completed_successfully",
+        )
+
+    def test_hermes_uses_pinned_agent_and_persistent_isolated_source(self):
+        initializer = self.config["services"]["hermes-agent-init"]
+        self.assertRegex(
+            initializer["environment"]["HERMES_AGENT_REF"], r"^[0-9a-f]{40}$"
+        )
+        webui = self.config["services"]["hermes-webui"]
+        source_mount = next(
+            mount for mount in webui["volumes"]
+            if mount["target"] == "/home/hermeswebui/.hermes/hermes-agent"
+        )
+        self.assertEqual(source_mount["type"], "volume")
+        self.assertEqual(source_mount["source"], "hermes-agent-src")
+        self.assertTrue(source_mount["read_only"])
+        self.assertIn("hermes-agent-src", self.config["volumes"])
+
+    def test_hermes_chat_is_in_process_not_gateway_dependent(self):
+        services = self.config["services"]
+        self.assertEqual(services["hermes-webui"]["network_mode"], "host")
+        all_text = json.dumps(services)
+        self.assertNotIn("HERMES_API_URL", all_text)
+        self.assertNotIn("8788", all_text)
+
 
 if __name__ == "__main__":
     unittest.main()

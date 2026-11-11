@@ -22,32 +22,33 @@ dispositivos del host y un inicializador con condición de finalización.
 | `docker-agent` | — | Runner opcional, perfil `agent`; código montado externamente |
 
 La fuente de verdad de puertos, mounts y perfiles es `docker-compose.yml`.
-OpenWebUI y LiteLLM están retirados, no son requisitos del stack. Su volumen
-antiguo no se elimina: ver [migración y retirada opcional](docs/retirada-openwebui-litellm.md).
+OpenWebUI y LiteLLM están retirados, no son requisitos del stack. Consulta la
+[guía única de instalación, arranque, migración y datos antiguos](docs/migracion-hermes-webui.md).
 
 ## Inicio
 
+Los pasos siguientes usan las rutas predeterminadas. La instalación limpia y la
+configuración inicial de Hermes se detallan en la guía enlazada; no sobrescribas `.env`
+ni `$HOME/.hermes/config.yaml` existentes.
+
 ```bash
-# Solo instalación nueva; NO sobrescribir un .env existente.
-cp .env.example .env
+cp -n .env.example .env
 # Ajustar rutas, UID/GID y credenciales locales necesarias.
 docker compose config -q
 docker compose up -d --build
 ```
 
 Requisitos: Docker Engine/Compose v2, acceso a Internet para imágenes/fuentes,
-permisos sobre los binds del host y los dispositivos Intel del Compose. OVMS
-monta los modelos desde `${HOME}/modelos/openvino`; no los descarga este arranque.
-Open Terminal requiere `${HOME}/openproject/jobs` y conserva su volumen de datos.
-No usar `down -v` para mantenimiento.
+permisos sobre los binds del host y los dispositivos Intel del Compose. OVMS monta
+los modelos desde la ruta del servicio `ia-gpu-intel-openvino`; no los descarga este
+arranque. Los demás binds externos del Compose deben existir. No usar `down -v` para
+mantenimiento.
 
 **Hermes WebUI forma parte del Compose raíz** y se inicia con el mismo
 `docker compose up -d`: abre `http://127.0.0.1:8787`. El inicializador obtiene el
-agente y sus submódulos antes de arrancar la interfaz, sin Compose independiente
-ni gateway intermedio. Seguir [requisitos, configuración directa del modelo,
-persistencia y migración](hermes-webui/README.md). El backend se configura en el
-home de Hermes, no mediante una clave de gateway en el `.env` de Compose.
-No arrancar dos interfaces sobre el mismo puerto/home.
+agente y sus submódulos antes de arrancar la interfaz, sin Compose independiente ni
+gateway intermedio. El backend se configura en el home de Hermes. No arrancar dos
+interfaces sobre el mismo puerto/home.
 
 **Inferencia:** [MESH.md](MESH.md) describe conexiones directas, modelos reales
 y API del orquestador. Hailo, NPU y ninfer son servicios externos, no levantados
