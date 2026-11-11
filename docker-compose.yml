@@ -7,7 +7,6 @@ volumes:
   ov_cache: null
   lms-config: null
   open-terminal-data: null
-  mesh-orchestrator-data: null
 services:
   # Hermes ejecuta el agente in-process; el init obtiene su código y submódulos.
   hermes-agent-init:
@@ -84,22 +83,6 @@ services:
         constraints:
         - node.hostname == khazad-dum
 
-  fetch-mcp:
-    build:
-      context: ./mcp-servers/fetch-mcp
-      dockerfile: Dockerfile
-    image: fetch-mcp:latest
-    container_name: fetch-mcp
-    restart: unless-stopped
-    ports:
-      - "8095:8095"
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
   # SearXNG - metabuscador (backend de busqueda para searxng-mcp y para el
   # backend `searxng` de Hermes en config.yaml). Puerto host 8085 -> 8080.
   searxng:
@@ -133,51 +116,6 @@ services:
       - SEARXNG_URL=http://searxng:8080
     depends_on:
       - searxng
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  # Mismo servidor con transporte streamable-http (POST /mcp), conservado para
-  # clientes MCP que no usan SSE. Es independiente del frontend retirado.
-  searxng-mcp-http:
-    build:
-      context: ./mcp-servers/searxng-mcp
-      dockerfile: Dockerfile
-    image: searxng-mcp:latest
-    container_name: searxng-mcp-http
-    restart: unless-stopped
-    command: ["python", "app.py", "--port", "8093", "--transport", "streamable-http"]
-    ports:
-      - "8093:8093"
-    environment:
-      - SEARXNG_URL=http://searxng:8080
-    depends_on:
-      - searxng
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
-
-  nano-fs-tools-mcp:
-    build:
-      context: ./mcp-servers/nano-fs-tools-mcp
-      dockerfile: Dockerfile
-    image: nano-fs-tools-mcp:latest
-    container_name: nano-fs-tools-mcp
-    restart: unless-stopped
-    ports:
-      - "8096:8096"
-    volumes:
-      - /home/arkantu/workspace:/workspace
-    environment:
-      - WORKSPACE_DIR=/workspace
-      - OPENVINO_GENAI_URL=http://ia-gpu-intel-openvino:8000/v1
-      - INTEL_OPENVINO_URL=http://ia-gpu-intel-openvino:8000/v1
     networks:
       - ia-routing-stack
     deploy:
@@ -350,41 +288,31 @@ services:
         - node.hostname == khazad-dum
 
   # ==========================================
-  # ORQUESTACION DE INFERENCIA
-  # mesh-orchestrator conserva la cola acotada por carril y el fan-out con planner.
-  # MODEL_ROUTES traduce cada alias publico a un proveedor OpenAI-compatible real:
-  #   chat/deep/lms27/worker-big/arc/worker/tiny -> OVMS en la iGPU
-  #   ocr -> Hailo-8L. No hay gateway intermedio ni credenciales sinteticas.
+  # NINFER-SERVER (Tesla V100)
+  # Motor ninfer propio, endpoint OpenAI-compatible en 127.0.0.1:8090 con
+  # model-id "ninfer" (vision incluida). La imagen ninfer-v100:bench lleva los
+  # binarios; aquí solo se montan modelos y grafts.
+  # El contenedor se mantiene vivo (sleep infinity): ninfer-serve.sh lanza y
+  # relanza el motor dentro con `docker exec`, así se cambia de artefacto o de
+  # contexto sin recrear el contenedor ni perder la GPU.
+  # network_mode: host publica 8090 en loopback (Hermes lo usa en config.yaml)
+  # y evita el NAT del bridge. La GPU entra por CDI.
+  # Arranque del motor: ./ninfer-serve.sh [modelo] [ctx] [concurrencia] [draft]
   # ==========================================
-
-  mesh-orchestrator:
-    build:
-      context: ./mesh-orchestrator
-    image: mesh-orchestrator:local
-    container_name: mesh-orchestrator
+  ninfer-server:
+    # Perfil `ninfer`: la V100 es una eGPU y no siempre está enumerada
+    # (sin ella, la inyección CDI falla y abortaría el `up -d` completo).
+    # Arrancar en el host con la GPU presente:
+    #   docker compose --profile ninfer up -d ninfer-server
+    profiles: ["ninfer"]
+    image: ninfer-v100:bench
+    container_name: ninfer-serve
     restart: unless-stopped
-    ports:
-      - "4010:4010"
-    environment:
-      - MODEL_ROUTES={"chat":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"deep":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"lms27":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"worker-big":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"arc":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"worker":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"tiny":{"base_url":"http://ia-gpu-intel-openvino:8000/v1","model":"Qwen3-30B-A3B-Instruct-2507-int4-ov"},"ocr":{"base_url":"http://192.168.0.80:8089/v1","model":"ocr-hailo-8l"}}
-      - MAX_QUEUE_PER_LANE=100
-      - LANE_CONCURRENCY={"chat":2,"deep":1,"lms27":1,"worker":4,"worker-big":2}
-      - ALLOW_SHELL=0
-      - TASK_TIMEOUT=900
-      - DATA_DIR=/data
-      # Sonda directa al proveedor. No hay fallback a otro alias del mismo motor.
-      - LANE_HEALTH={"worker":"http://ia-gpu-intel-openvino:8000/v1/models"}
-      - LANE_FALLBACK={}
-      - LANE_DOWN_TTL=60
-      - LANE_HEALTH_TIMEOUT=3
-      - TZ=Europe/Madrid
+    network_mode: host
+    ipc: host
+    devices:
+      - nvidia.com/gpu=all
     volumes:
-      - mesh-orchestrator-data:/data
-    depends_on:
-      - ia-gpu-intel-openvino
-    networks:
-      - ia-routing-stack
-    deploy:
-      placement:
-        constraints:
-        - node.hostname == khazad-dum
+      - /home/arkantu/workspace/ninfer-v100/grafts:/grafts:ro
+      - /home/arkantu/workspace/ninfer-v100/models:/models:ro
+    command: ["sleep", "infinity"]

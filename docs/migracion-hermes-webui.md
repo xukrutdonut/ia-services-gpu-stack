@@ -88,7 +88,6 @@ curl --noproxy '*' -fsS http://127.0.0.1:8787/api/onboarding/status
 # Si la UI tiene contraseña, el último endpoint exige autenticación (HTTP 401).
 
 python3 -m unittest discover -s tests -v
-DATA_DIR="$PWD/.test-data" python3 -m unittest discover -s mesh-orchestrator -v
 python3 -m unittest discover -s hermes-webui -p 'test_*.py' -v
 bash -n hermes-webui/init-agent.sh
 ```

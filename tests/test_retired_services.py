@@ -21,7 +21,15 @@ class RetiredServicesTest(unittest.TestCase):
         cls.config = json.loads(result.stdout)
 
     def test_removed_services_not_in_any_profile(self):
-        self.assertTrue({"litellm", "open-webui"}.isdisjoint(self.config["services"]))
+        removed = {
+            "litellm",
+            "open-webui",
+            "mesh-orchestrator",
+            "fetch-mcp",
+            "nano-fs-tools-mcp",
+            "searxng-mcp-http",
+        }
+        self.assertTrue(removed.isdisjoint(self.config["services"]))
 
     def test_all_startup_dependencies_exist(self):
         for name, service in self.config["services"].items():
@@ -35,12 +43,18 @@ class RetiredServicesTest(unittest.TestCase):
                 self.assertNotRegex(text, r"(?i)https?://(?:litellm|open-webui)(?::|/)")
                 self.assertNotRegex(text, r"LITELLM_(?:BASE|MASTER_KEY)|OPENWEBUI_SECRET_KEY")
 
-    def test_conversation_routes_use_available_ovms_by_default(self):
-        routes = json.loads(self.config["services"]["mesh-orchestrator"]["environment"]["MODEL_ROUTES"])
-        for alias in ("chat", "deep", "worker", "worker-big", "arc"):
-            with self.subTest(alias=alias):
-                self.assertEqual(routes[alias]["base_url"], "http://ia-gpu-intel-openvino:8000/v1")
-                self.assertEqual(routes[alias]["model"], "Qwen3-30B-A3B-Instruct-2507-int4-ov")
+    def test_ninfer_server_runs_on_the_v100_with_host_networking(self):
+        ninfer = self.config["services"]["ninfer-server"]
+        self.assertEqual(ninfer["image"], "ninfer-v100:bench")
+        self.assertEqual(ninfer["container_name"], "ninfer-serve")
+        self.assertEqual(ninfer["network_mode"], "host")
+        self.assertEqual([d["source"] for d in ninfer["devices"]], ["nvidia.com/gpu=all"])
+        targets = {mount["target"] for mount in ninfer["volumes"]}
+        self.assertEqual(targets, {"/models", "/grafts"})
+        for mount in ninfer["volumes"]:
+            self.assertTrue(mount["read_only"])
+        # El motor lo arranca ninfer-serve.sh dentro del contenedor, no el Compose.
+        self.assertEqual(ninfer["command"], ["sleep", "infinity"])
 
     def test_retired_launch_files_removed(self):
         self.assertFalse((ROOT / "litellm/config.yaml").exists())
@@ -48,10 +62,12 @@ class RetiredServicesTest(unittest.TestCase):
         self.assertFalse(list(ROOT.glob("docker-compose.yml.bak*")))
 
     def test_shared_services_and_volumes_remain(self):
-        for name in ("open-terminal", "searxng", "searxng-mcp", "searxng-mcp-http", "mesh-orchestrator", "ia-gpu-intel-openvino"):
+        for name in ("open-terminal", "searxng", "searxng-mcp", "ninfer-server",
+                     "ia-gpu-intel-openvino", "hermes-webui"):
             self.assertIn(name, self.config["services"])
-        for volume in ("open-terminal-data", "mesh-orchestrator-data", "ov_cache"):
+        for volume in ("open-terminal-data", "ov_cache", "hermes-agent-src"):
             self.assertIn(volume, self.config["volumes"])
+        self.assertNotIn("mesh-orchestrator-data", self.config.get("volumes", {}))
         self.assertNotIn("open-webui-data", self.config.get("volumes", {}))
 
     def test_hermes_starts_agent_before_webui_without_optional_profiles(self):

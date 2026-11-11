@@ -1,0 +1,20 @@
+# /etc/systemd/system/ninfer-serve.service
+# ninfer engine (V100) en contenedor ninfer-serve :8090. Runtime autocontenido
+# ninfer-v100:bench; binarios dentro de la imagen, /models montado desde
+# ~/workspace/ninfer-v100/models. Default = Qwen3.8-Flash-Next IQ4_NL (2026-11-11).
+[Unit]
+Description=ninfer engine (V100) en contenedor ninfer-serve :8090
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=300
+ExecStartPre=/bin/sh -c 'docker start ninfer-serve >/dev/null 2>&1 || true; for i in $(seq 1 60); do docker exec ninfer-serve true 2>/dev/null && exit 0; sleep 2; done; exit 1'
+ExecStart=/home/arkantu/produccion/ia-services-stack/ninfer-serve.sh
+ExecStop=/bin/sh -c 'docker exec ninfer-serve sh -c "for p in \$(pgrep -f ninfer-serve); do kill \$p; done; sleep 10; for p in \$(pgrep -f ninfer-serve); do kill -9 \$p; done" || true'
+
+[Install]
+WantedBy=multi-user.target

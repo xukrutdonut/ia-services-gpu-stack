@@ -14,7 +14,6 @@ Sitúa OI detrás de un endpoint OpenAI-compatible (localhost:8007) que:
 Servidores MCP soportados:
   - openterminal-mcp (localhost:8003): execute_command, terminal_read_file, terminal_list_files
   - searxng-mcp      (localhost:8092): search_web
-  - nano-fs-tools-mcp (localhost:8096): read_file, write_file, edit_file, list_dir,
     create_dir, delete_file, delete_dir, move_file, file_info, plan_create, plan_status,
     plan_update, audit_plan, subagent_task
 
@@ -43,7 +42,6 @@ MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "10"))
 MCP_SERVERS: dict[str, str] = {
     "openterminal-mcp": os.getenv("MCP_SSE_URL", "http://localhost:8004/sse"),
     "searxng-mcp": os.getenv("SEARXNG_SSE_URL", "http://localhost:8092/sse"),
-    "nano-fs-tools-mcp": os.getenv("NANO_FS_SSE_URL", "http://localhost:8096/sse"),
 }
 
 logging.basicConfig(

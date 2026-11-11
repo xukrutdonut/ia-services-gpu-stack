@@ -12,7 +12,6 @@ Desde la raíz del repositorio:
 
 ```bash
 python3 -m unittest discover -s tests -v
-DATA_DIR="$PWD/.test-data" python3 -m unittest discover -s mesh-orchestrator -v
 python3 -m unittest discover -s hermes-webui -p 'test_*.py' -v
 bash -n hermes-webui/init-agent.sh
 docker compose --env-file .env.example --profile '*' config -q
