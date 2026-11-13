@@ -1,0 +1,17 @@
+[Unit]
+Description=V100 telemetry exporter (nvidia-smi -> HTTP :9101)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/v100-fan/exporter.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

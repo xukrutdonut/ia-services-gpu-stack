@@ -313,6 +313,6 @@ services:
     devices:
       - nvidia.com/gpu=all
     volumes:
-      - /home/arkantu/workspace/ninfer-v100/grafts:/grafts:ro
-      - /home/arkantu/workspace/ninfer-v100/models:/models:ro
+      - /home/arkantu/produccion/ninfer-v100/grafts:/grafts:ro
+      - /home/arkantu/produccion/ninfer-v100/models:/models:ro
     command: ["sleep", "infinity"]

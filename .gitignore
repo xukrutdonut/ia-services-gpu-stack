@@ -46,3 +46,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Estado runtime del router ninfer (no es config)
+.ninfer-current

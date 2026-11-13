@@ -23,6 +23,10 @@ La fuente de verdad de puertos, mounts y perfiles es `docker-compose.yml`.
 OpenWebUI y LiteLLM están retirados, no son requisitos del stack. Consulta la
 [guía única de instalación, arranque, migración y datos antiguos](docs/migracion-hermes-webui.md).
 
+Puesta en marcha completa de la **Tesla V100** (hardware, driver, motor
+ninfer, ventilador y verificación): [V100-HOWTO.md](V100-HOWTO.md). El
+subsistema del ventilador vive en [`v100-fan/`](v100-fan/README.md).
+
 ## Inicio
 
 Los pasos siguientes usan las rutas predeterminadas. La instalación limpia y la

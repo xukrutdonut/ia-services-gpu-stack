@@ -1,0 +1,35 @@
+# Parametros del controlador de ventilador de la V100 (rpi3b-1 .101)
+# Ventilador: ARCTIC S12038-8K (4 hilos: negro GND, rojo +12V, amarillo
+# tacometro, azul PWM de 5 V con pull-up interno).
+#
+# IMPORTANTE sobre el cableado:
+#  - La linea PWM (azul) es de 5 V con pull-up interno. El GPIO12 del Pi es
+#    push-pull de 3,3 V: no puede excitarla (VIH ~3,5 V) y el ventilador se
+#    queda PARADO. Con el cable desconectado el ventilador corre al 100 %
+#    (manda su pull-up), que es de donde salio la confusion inicial.
+#    - Con MOSFET (2N7000/2N2222) en open-drain sobre el azul: V100_PWM_INVERT=1.
+#    - Sin MOSFET no hay control de velocidad: solo el modo seguro al 100 %.
+#  - Masa comun obligatoria: GND del Pi (pin 6) al GND del ventilador/fuente.
+#    Sin ella el tacometro no da pulsos y el PWM no tiene referencia.
+#  - Tacometro: amarillo -> 10k en serie -> GPIO23, con 3k3 de GPIO23 a GND
+#    (el amarillo es open-collector con pull-up a 5 V: nunca directo al pin).
+V100_PWM_PIN=12
+V100_TACH_PIN=23
+V100_PWM_HZ=25000
+V100_TELEMETRY=http://<HOST-GPU>:9101/temp
+V100_INTERVAL=2.0
+V100_HTTP_PORT=9102
+# V100_PWM_INVERT=1
+# V100_RPM_FLOOR=2500
+# V100_TACH_PULSES=2
+
+# Tope de duty por ruido (curva temp->duty limitada; NO limita las
+# escaladas de seguridad: throttle detectado o perdida de telemetria suben a 100%).
+# 45 = ~4900 RPM, medido sin throttling con 185 W sostenidos (meseta 71 C).
+# 36 ya provoc6 HW slowdown (0x4, 1095 MHz) con esa carga.
+V100_DUTY_CAP=45
+
+# Curva de silencio: duty ~5 (minimo) hasta 55 C; luego rampa lineal a tope
+# 45 (V100_DUTY_CAP) con slew +4%/-2% por ciclo de 2 s (sin tirones).
+V100_DUTY_MIN=5
+V100_TEMP_QUIET=55

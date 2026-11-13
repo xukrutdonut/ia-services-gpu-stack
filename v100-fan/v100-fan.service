@@ -1,0 +1,19 @@
+[Unit]
+Description=V100 fan controller (ARCTIC S12038-8K, open-drain software PWM + tach)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/v100-fan
+ExecStart=/usr/bin/python3 /opt/v100-fan/fanctl.py
+Restart=always
+RestartSec=3
+RuntimeDirectory=v100-fan
+RuntimeDirectoryPreserve=yes
+Nice=-5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
