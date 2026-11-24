@@ -21,11 +21,6 @@ copy_to_shm() {  # copia $1 (src en /models) -> $2 (dst en /dev/shm) si falta o 
     docker exec ninfer-serve cp "$SRC" "$DST"
   fi
 }
-# Solo gemma en RAM (produccion) para swaps rapidos; qwen se carga bajo demanda
-# desde disco (swap mas lento pero libera ~22 GB de RAM / zram).
-# copy_to_shm /models/qwen38-35b-a3b-distill.ninfer /dev/shm/qwen.ninfer
-copy_to_shm /models/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-ninfer-v3.ninfer /dev/shm/gemma.ninfer
-
 # Modo stop: mismo TERM/KILL anclado que ninfer-serve.sh
 if [ "${1:-}" = stop ]; then
   docker exec ninfer-serve sh -c "for p in \$(pgrep -f '^/build/apps/ninfer-serve'); do kill \"\$p\" 2>/dev/null; done
@@ -35,6 +30,11 @@ if [ "${1:-}" = stop ]; then
   exit 0
 fi
 
+# Copia Gemma solo si el preset realmente utiliza su ruta en RAM.
+if grep -Eq '^[[:space:]]*model[[:space:]]*=[[:space:]]*/dev/shm/gemma\.ninfer([[:space:]]|$)' "$INI"; then
+  copy_to_shm /models/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-ninfer-v3.ninfer /dev/shm/gemma.ninfer
+fi
+
 docker cp "$INI" ninfer-serve:/tmp/ninfer-router.ini
 docker exec ninfer-serve sh -c "for p in \$(pgrep -f '^$BIN'); do kill \"\$p\" 2>/dev/null; done
   for i in \$(seq 1 30); do pgrep -f '^$BIN' >/dev/null || break; sleep 1; done
@@ -42,4 +42,4 @@ docker exec ninfer-serve sh -c "for p in \$(pgrep -f '^$BIN'); do kill \"\$p\" 2
 docker exec -d ninfer-serve sh -c "setsid $BIN --models-preset /tmp/ninfer-router.ini \
   --host 0.0.0.0 --port 8090 --models-max 1 \
   > /tmp/serve.log 2>&1 < /dev/null"
-echo "ninfer: router subido -> :8090 (preset 3 modelos, models-max 1, swap por descarga)"
+echo "ninfer: router subido -> :8090 (models-max 1, swap por descarga)"

@@ -305,7 +305,7 @@ services:
     # Arrancar en el host con la GPU presente:
     #   docker compose --profile ninfer up -d ninfer-server
     profiles: ["ninfer"]
-    image: ninfer-v100:bench
+    image: ninfer-v100:60dc003-sm70
     container_name: ninfer-serve
     restart: unless-stopped
     network_mode: host
