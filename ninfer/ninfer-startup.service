@@ -1,0 +1,13 @@
+[Unit]
+Description=Recuperar ninfer después del arranque de Docker y DATA
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/test -d /mnt/data/modelos/ninfer
+ExecStart=/usr/bin/docker start ninfer-serve
+Restart=on-failure
+RestartSec=20s
+
+[Install]
+WantedBy=default.target

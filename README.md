@@ -11,7 +11,7 @@ dispositivos del host y un inicializador con condición de finalización.
 | `hermes-webui` | 8787, loopback por defecto | Interfaz de Hermes; proveedor configurado en su home |
 | `hermes-agent-init` | — | Inicializa el agente y submódulos antes de la UI |
 | `ia-gpu-intel-openvino` | 8006 | OVMS: chat y embeddings compatibles OpenAI, `/v1/models` |
-| `ninfer-server` | 8090 | Motor ninfer en la V100 (perfil `ninfer`); contenedor `ninfer-serve`, el motor se lanza con `./ninfer-serve.sh` |
+| `ninfer-server` | 8090 | Router NInfer en la V100; arranca con el contenedor `ninfer-serve` |
 | `open-terminal` | 8003 | API REST de herramientas, no MCP |
 | `searxng` | 8085 | Buscador compartido |
 | `searxng-mcp` | 8092 | Adaptador MCP de búsqueda (SSE) |
@@ -55,9 +55,9 @@ interfaces sobre el mismo puerto/home.
 **Inferencia:** [MESH.md](MESH.md) describe las conexiones directas y los IDs
 reales de modelo. Para usar Hermes contra la V100 hay un perfil dedicado con el
 prompt recortado (60 % menos tokens por turno) y el preset de arranque del motor:
-[perfil v100](docs/perfil-v100-hermes.md). Hailo y la NPU son externos; ninfer sí lo levanta este Compose
-(`ninfer-server`, perfil `ninfer` porque la V100 es una eGPU que no siempre está
-enumerada), aunque su motor se arranca aparte con `./ninfer-serve.sh`.
+[perfil v100](docs/perfil-v100-hermes.md). Hailo y la NPU son externos; ninfer
+arranca con el Compose principal y necesita la V100 enumerada por CDI. Si la eGPU
+no está disponible, su arranque puede fallar. Configuración y scripts en `ninfer/`.
 No hay orquestador ni gateway intermedio: cada cliente apunta al proveedor.
 
 ## Comprobaciones
@@ -67,7 +67,7 @@ docker compose --env-file .env.example config -q
 python3 -m unittest discover -s tests -v
 python3 -m unittest discover -s hermes-webui -p 'test_*.py' -v
 curl --fail http://127.0.0.1:8006/v1/models
-# con el motor ninfer lanzado (./ninfer-serve.sh):
+# El router ninfer arranca con su contenedor:
 curl --fail http://127.0.0.1:8090/v1/models
 docker compose ps -a
 ```

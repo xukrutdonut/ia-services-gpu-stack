@@ -45,16 +45,15 @@ class RetiredServicesTest(unittest.TestCase):
 
     def test_ninfer_server_runs_on_the_v100_with_host_networking(self):
         ninfer = self.config["services"]["ninfer-server"]
-        self.assertEqual(ninfer["image"], "ninfer-v100:bench")
+        self.assertEqual(ninfer["image"], "ninfer-v100:60dc003-sm70")
         self.assertEqual(ninfer["container_name"], "ninfer-serve")
         self.assertEqual(ninfer["network_mode"], "host")
         self.assertEqual([d["source"] for d in ninfer["devices"]], ["nvidia.com/gpu=all"])
         targets = {mount["target"] for mount in ninfer["volumes"]}
-        self.assertEqual(targets, {"/models", "/grafts"})
+        self.assertEqual(targets, {"/models", "/grafts", "/config/ninfer-router.ini", "/opt/ninfer/entrypoint.sh"})
         for mount in ninfer["volumes"]:
             self.assertTrue(mount["read_only"])
-        # El motor lo arranca ninfer-serve.sh dentro del contenedor, no el Compose.
-        self.assertEqual(ninfer["command"], ["sleep", "infinity"])
+        self.assertEqual(ninfer["command"], ["/bin/sh", "/opt/ninfer/entrypoint.sh"])
 
     def test_retired_launch_files_removed(self):
         self.assertFalse((ROOT / "litellm/config.yaml").exists())

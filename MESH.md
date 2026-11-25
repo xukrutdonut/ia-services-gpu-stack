@@ -9,7 +9,7 @@ la requiere. Hermes usa la configuración de su home: [integración](hermes-webu
 | Proveedor | Base desde el host | Modelos publicados por `/v1/models` |
 |---|---|---|
 | OVMS del stack | `http://127.0.0.1:8006/v1` | `Qwen3-30B-A3B-Instruct-2507-int4-ov`, `qwen3-embedding-0.6b-int4-ov`, `nomic-embed-text-v1.5-ov` |
-| ninfer (V100, en el stack) | `http://127.0.0.1:8090/v1` | `ninfer` |
+| ninfer (V100, en el stack) | `http://127.0.0.1:8090/v1` | IDs configurados en `ninfer/ninfer-router.ini` |
 | Hailo externo | `http://192.168.0.80:8089/v1` | `ocr-hailo-8l`, `clip-resnet-50x4-hailo` |
 | NPU externa | `http://127.0.0.1:8012/v1` | `qwen3-embedding-0.6b-int4-ov` |
 
@@ -23,25 +23,21 @@ inferencia.
 
 ## ninfer en la V100 (`:8090`)
 
-`ninfer-server` forma parte del Compose: mantiene el contenedor `ninfer-serve`
-(imagen `ninfer-v100:bench`, GPU por CDI, `network_mode: host`, modelos y grafts
-montados en solo lectura). El motor **no** arranca solo; el contenedor es el
-runtime y `./ninfer-serve.sh [modelo] [ctx] [concurrencia] [draft]` lo lanza o
-relanza dentro con `docker exec`. model-id fijo `ninfer`; vision incluida con
-`--vision`. Los defaults del script son el preset de máxima velocidad (ctx 32768,
-1 slot, draft 3) pensado para Hermes; con varios clientes, pasar `65536 2 3`. El
-detalle y la medición están en [perfil v100](docs/perfil-v100-hermes.md). El motor ignora SIGTERM, por eso el script hace TERM → espera →
-SIGKILL antes de relanzar.
-
-El servicio está en el perfil `ninfer` porque la V100 es una eGPU: cuando no está
-enumerada (sin `/dev/nvidia-uvm`, `NVRM: No NVIDIA GPU found`), la inyección CDI
-falla y abortaría el `up -d` de todo el stack. Sin el perfil, el resto arranca igual.
+`ninfer-server` pertenece al Compose principal y ejecuta el router como proceso
+principal. Monta el preset desde `ninfer/ninfer-router.ini` y los modelos desde
+`/mnt/data/modelos/ninfer`. Tras reiniciar el contenedor el motor vuelve a arrancar;
+una unidad de usuario reintenta el arranque si DATA o Docker aún no están listos.
+El modelo se carga bajo demanda. El servicio requiere la GPU CDI: si la eGPU no
+está enumerada, el `up` del stack puede fallar al iniciarlo.
 
 ```bash
-docker compose --profile ninfer up -d ninfer-server   # host con la GPU presente
-./ninfer-serve.sh
+docker compose up -d ninfer-server
+./ninfer/ninfer-mgr.sh status
+./ninfer/ninfer-mgr.sh load qwen3.8-35b-a3b
 curl --fail http://127.0.0.1:8090/v1/models
 ```
+
+Para aplicar cambios al preset: `./ninfer/ninfer-router.sh restart`.
 
 La [migración](docs/retirada-openwebui-litellm.md) explica la retirada de
 contenedores, datos y clientes externos. Las mediciones y procedimientos previos

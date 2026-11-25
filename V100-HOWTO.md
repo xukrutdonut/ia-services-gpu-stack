@@ -1,5 +1,8 @@
 # HOWTO: hacer funcionar una Tesla V100 PCIe (32 GB) en este stack
 
+> Nota: las instrucciones de arranque y gestión de esta guía son históricas. El
+> procedimiento vigente está en [MESH.md](MESH.md#ninfer-en-la-v100-8090).
+
 Guía de puesta en marcha de la V100 que sirve los modelos en `:8090`
 (`ninfer-serve`). Va de "tarjeta en la mano" a "cliente preguntando", con los
 errores reales que esta config produce y sus arreglos medidos.
